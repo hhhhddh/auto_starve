@@ -1,0 +1,57 @@
+{
+  "schema": "auto-starve/integration@1",
+  "sourceVersion": "0.1.6",
+  "platform": "Windows x64",
+  "components": {
+    "client": "mods/WilsonExpedition",
+    "diagnostics": "mods/WilsonExpeditionDiagnostics",
+    "controller": "development-support/nbot-relay/iteration.py",
+    "deathCollector": "development-support/nbot-relay/death_watch.py",
+    "piNotifications": ".pi/extensions/wilson-iteration.js",
+    "offlineRegressions": ".pi/runtime-recovery",
+    "optionalRelayClient": "development-support/nbot-relay/nbot_relay",
+    "optionalRelayServer": "development-support/nbot-relay/server"
+  },
+  "runtimeDirectories": {
+    "private": "development-support/nbot-relay/private",
+    "captures": "development-support/nbot-relay/captures",
+    "defaultStorage": ".local/dst"
+  },
+  "deployment": {
+    "configure": "python deploy.py configure --game-dir <DST_INSTALL_DIR>",
+    "install": "python deploy.py install",
+    "syntax": "python deploy.py check",
+    "offlineTests": "python deploy.py test",
+    "prepare": "python development-support/nbot-relay/iteration.py prepare"
+  },
+  "world": {
+    "mode": "endless",
+    "surfacePreset": "ENDLESS",
+    "cavePreset": "DST_CAVE",
+    "gamePorts": [11011, 11012],
+    "shardAndSteamPorts": [11243, 11244, 11245, 11246, 11247]
+  },
+  "evidence": {
+    "deathBundleSchema": "wilson-expedition/death-bundle@1",
+    "captureSchema": "wilson-expedition/death-capture@1",
+    "analysisSchema": "wilson-expedition/death-analysis@1",
+    "traceWindowSeconds": 120,
+    "persistentBundle": true,
+    "pauseRequiresBothShardReceipts": true,
+    "relayRequired": false
+  },
+  "relay": {
+    "defaultEnabled": false,
+    "readOnlyToolActions": ["world_info", "players"],
+    "goVersion": "1.23 or later",
+    "buildValidation": "optional relay was not compiled in the source environment"
+  },
+  "handoff": {
+    "aiInstructions": "AGENTS.md",
+    "iterationSummary": "handoff/iterations.json",
+    "completedOptimizations": 3,
+    "latestFixGameValidated": false,
+    "survival70DaysAccepted": false,
+    "bossWork": "paused"
+  }
+}

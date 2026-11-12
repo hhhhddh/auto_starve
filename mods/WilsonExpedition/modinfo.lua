@@ -1,0 +1,9 @@
+name = "威尔逊远征 / Wilson Expedition"
+description = "自动选择威尔逊，进入世界并就绪后自动生存。F6 继续，F7 暂停，F8 停止；手动操作自动暂停。死亡后归档证据，优化通过后在项目测试世界开始新一轮。"
+author = "Wilson Expedition"
+version = "0.1.6"
+api_version = 10
+dst_compatible = true
+client_only_mod = true
+all_clients_require_mod = false
+configuration_options = {}

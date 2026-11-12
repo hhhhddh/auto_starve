@@ -1,0 +1,73 @@
+{
+  "schema": "auto-starve/handoff-iterations@1",
+  "latestVersion": "0.1.6",
+  "completedOptimizations": 3,
+  "status": "completed_paused",
+  "nextTestAuthorized": false,
+  "goal": {"survivalDays": 70, "allFourSeasons": true, "accepted": false},
+  "iterations": [
+    {
+      "number": 1,
+      "testedVersion": "0.1.3",
+      "repairedVersion": "0.1.4",
+      "survivalSecondsApprox": 1403,
+      "observedFailure": "Repeatedly visiting exhausted grass landmarks without obtaining materials; lighting eventually ran out at night.",
+      "changes": [
+        "Remember observations independently per landmark.",
+        "Skip currently non-harvestable plants and explore when known sources are exhausted.",
+        "Extend procurement budgets only for actual resource or crafting progress, not navigation arrivals."
+      ],
+      "validation": "Targeted regressions fail on old source and pass on repaired source; syntax and related checks passed. The repaired version was then used in iteration 2.",
+      "sources": ["mods/WilsonExpedition/scripts/wilsonexpedition/supplies.lua"],
+      "regression": ".pi/runtime-recovery/check-empty-landmarks.py"
+    },
+    {
+      "number": 2,
+      "testedVersion": "0.1.4",
+      "repairedVersion": "0.1.5",
+      "survivalSecondsApprox": 1206,
+      "observedFailure": "A clockwork rook killed the character after retreats ended too near its acquisition range and procurement paths re-entered danger.",
+      "changes": [
+        "Use the native rook acquisition distance for proactive avoidance.",
+        "Check threats along entire navigation segments, including direct routes and waypoint handoffs.",
+        "Keep retreating until a safe separation is reached before resuming procurement."
+      ],
+      "validation": "Six targeted threat/retreat regressions and related checks passed. The repaired version was then used in iteration 3.",
+      "sources": ["mods/WilsonExpedition/scripts/wilsonexpedition/navigation.lua", "mods/WilsonExpedition/scripts/wilsonexpedition/survival.lua"],
+      "regression": ".pi/runtime-recovery/check-threat-retreat.py"
+    },
+    {
+      "number": 3,
+      "testedVersion": "0.1.5",
+      "repairedVersion": "0.1.6",
+      "survivalSecondsApprox": 1137,
+      "observedFailure": "A visible tallbird repeatedly attacked while the client threat list remained empty because native tallbirds do not have the hostile tag.",
+      "changes": [
+        "Recognize visible tallbirds using their native tag/prefab without classifying neutral animals as threats.",
+        "Cover native target acquisition and nest defense distances, including the spring multiplier.",
+        "Reuse full-segment avoidance and emergency retreat/preemption."
+      ],
+      "validation": "Three targeted threat regressions fail on old source and pass on repaired source. Exploration feedback, syntax and related checks passed. No subsequent game run was started.",
+      "sources": ["mods/WilsonExpedition/scripts/wilsonexpedition/observer.lua", "mods/WilsonExpedition/scripts/wilsonexpedition/navigation.lua"],
+      "regression": ".pi/runtime-recovery/check-tallbird-awareness.py"
+    }
+  ],
+  "previouslyCompleted": [
+    "Automatic Wilson lobby selection, spawning and survival startup entirely inside the client Mod.",
+    "Native inventory self-actions support keyboard/mouse clients as well as host and remote prediction modes.",
+    "CHOP/MINE/HAMMER hold native work controls across repeated swings and release on cancel, preemption or failure.",
+    "Lighting inventory preparation is separate from equipment; natural-light checks prevent premature torch consumption.",
+    "Safe navigation waypoints hand off movement continuously, with final arrival and cancellation preserved.",
+    "Death bundles persist before emitting short notifications to avoid the native 4095-byte log-line limit.",
+    "Resource review records inventory, equipment condition, ambient light and night countdown; suspected waste remains an evidence-based review item.",
+    "Native pause is confirmed independently by both shards after evidence capture.",
+    "Controller JSON replacement retries transient Windows sharing failures for up to two seconds, preserving old state on failure."
+  ],
+  "remainingValidation": [
+    "Game validation of version 0.1.6.",
+    "Sustained survival for 70 actual game days across all four seasons.",
+    "Long-run procurement, food, temperature, combat avoidance and inventory behavior.",
+    "Visual continuity of prolonged work/movement and continued execution while the window is unfocused."
+  ],
+  "privacy": "Only derived findings are distributed; raw sessions, user/account identifiers, credentials, logs, captures and world saves stay with their original owner."
+}

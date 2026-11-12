@@ -1,0 +1,6 @@
+{
+  "listen": "127.0.0.1:20502",
+  "token": "<GENERATE_LOCALLY>",
+  "max_body_bytes": 65536,
+  "max_polls": 2048
+}

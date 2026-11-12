@@ -1,0 +1,6 @@
+{
+  "schema": "auto-starve/deployment@1",
+  "game_dir": "<DST_INSTALL_DIR>",
+  "scripts_dir": "<EXTRACTED_NATIVE_SCRIPTS_DIR>",
+  "storage_root": ".local/dst"
+}

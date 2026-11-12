@@ -1,0 +1,26 @@
+# Local deployment and runtime data
+/deployment.local.json
+/.local/
+/.venv/
+/development-support/nbot-relay/private/
+/development-support/nbot-relay/captures/
+/development-support/nbot-relay/server/relay.exe
+/development-support/nbot-relay/nbot_relay/private/
+
+# Rebuildable outputs and temporary checks
+__pycache__/
+*.py[cod]
+*.log
+*.zip
+*.exe
+/.pi/runtime-recovery/*-check-*/
+/.pi/runtime-recovery/notifier-check-*/
+/.pi/runtime-recovery/state-replace-*/
+/.pi/runtime-recovery/reset-check-*/
+
+# Local game credentials and saves
+cluster_token.txt
+adminlist.txt
+server_token.txt
+.env
+.env.*
