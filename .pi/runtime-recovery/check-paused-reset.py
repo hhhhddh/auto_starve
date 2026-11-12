@@ -36,7 +36,9 @@ def check_paused_reset():
     lua.execute(native.group(0))
 
     class Process:
-        status = None
+        def __init__(self, arguments):
+            self.arguments = arguments
+            self.status = None
 
         def poll(self):
             return self.status
@@ -46,7 +48,15 @@ def check_paused_reset():
             return 0
 
         def terminate(self):
+            assert flags.get("next_round_running"), "the client and watcher must survive world regeneration"
             self.status = 0
+
+    launched = []
+
+    def launch(arguments, **kwargs):
+        process = Process(arguments)
+        launched.append(process)
+        return process
 
     def pause_world(processes, cluster, state, challenge, paused):
         requested.append(paused)
@@ -76,6 +86,9 @@ def check_paused_reset():
         def write(path, value):
             original_write(path, value)
             if path == job_path and value.get("stage") == "next_round_running":
+                clients = [process for process in launched if process.arguments == ["visible-client"]]
+                assert len(clients) == 1 and clients[0].poll() is None, "both rounds must share one live client"
+                flags["next_round_running"] = True
                 (private / "iteration-stop.request").write_text("test complete", encoding="utf-8")
 
         def loaded_job(identity):
@@ -95,12 +108,13 @@ def check_paused_reset():
              patch.object(iteration, "client_command", return_value=["visible-client"]), \
              patch.object(iteration, "set_world_paused", side_effect=pause_world), \
              patch.object(iteration, "process_command", side_effect=command), \
-             patch.object(iteration.subprocess, "Popen", side_effect=lambda *args, **kwargs: Process()), \
+             patch.object(iteration.subprocess, "Popen", side_effect=launch), \
              patch.object(iteration, "write_json", side_effect=write), \
              patch.object(iteration.time, "sleep"):
             iteration.run_owned({"luaFiles": 17, "pythonFiles": 3})
         state, job = iteration.read_json(state_path), iteration.read_json(job_path)
         assert flags["resets"] == 1 and requested == [True]
+        assert len(launched) == 4, "two shards, one watcher and one client must span both rounds"
         assert state["round"] == 2 and state["sessions"] == new_sessions
         assert "pause" not in state, "old pause confirmation must not describe the new sessions"
         assert state["revision"] == "repaired:build" and state["challenge"] == "new-challenge"
@@ -110,4 +124,4 @@ def check_paused_reset():
 
 if __name__ == "__main__":
     check_paused_reset()
-    print("PASS: paused fault world resets once, both new sessions and approved client build gate continuation")
+    print("PASS: native reset preserves the client process and gates continuation on both new sessions and approved source build")

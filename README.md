@@ -1,6 +1,6 @@
 # WilsonExpedition / auto_starve
 
-饥荒联机版客户端自动生存 Mod，以及与其配套的独立双分片测试、死亡取证和离线回归工具。当前源码版本为 **0.1.6**；三次死亡驱动优化已完成，70 个实际游戏日和完整四季的目标仍待验收。
+饥荒联机版客户端自动生存 Mod，以及与其配套的独立双分片测试、死亡取证和离线回归工具。当前客户端 Mod 展示版本保持 **0.1.6**，本地优化使用 `OPTIMIZATIONS.md` 中的连续迭代编号追踪；三次死亡驱动优化已完成，70 个实际游戏日和完整四季的目标仍待验收。
 
 ## 目录
 
@@ -83,7 +83,7 @@ python deploy.py test
 python development-support/nbot-relay/iteration.py approve <DEATH_JOB_ID> --summary "具体故障、修改及检查结果"
 ```
 
-`approve` 会让**正在运行并持有该世界的项目控制器**重建测试世界。须先保存故障世界，核对剩余轮数和当前授权；审批后由两个新分片会话和新 build 的客户端启动事件确认下一轮。历史三轮批次已经结束，接手者应获得新的实测授权后再开始。
+`approve` 会让**正在运行并持有该世界的项目控制器**调用原版 `c_regenerateworld()` 重置整集群，保持现有可见客户端进程，由原版加载流程进入新世界并读取 Mod。须先保存故障世界，核对剩余轮数和当前授权；审批后由两个新分片会话和新源码 build 的客户端启动事件确认下一轮。Mod 展示版本保持固定，代码身份由源码 SHA-256 与每轮 build 校验，优化情况追加到 `OPTIMIZATIONS.md`。历史三轮批次已经结束，接手者应获得新的实测授权后再开始。
 
 运行状态在 `development-support/nbot-relay/private/iteration-state.json`，死亡队列在 `private/iteration-queue`，证据在 `captures`。状态为 `blocked`、锁文件遗留或进程异常时，应先核对日志和 PID；现有进程不得被另一个控制器静默接管。
 

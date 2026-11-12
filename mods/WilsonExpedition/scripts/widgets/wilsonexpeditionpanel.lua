@@ -5,10 +5,11 @@ local Image = require("widgets/image")
 
 local ExpeditionPanel = Class(Widget, function(self, runtime)
     Widget._ctor(self, "WilsonExpeditionPanel")
-    self:SetHAnchor(ANCHOR_LEFT)
+    self:SetHAnchor(ANCHOR_MIDDLE)
     self:SetVAnchor(ANCHOR_TOP)
     self:SetScaleMode(SCALEMODE_PROPORTIONAL)
-    self:SetPosition(185, -250)
+    -- [喵喵喵]: 背景以中心定位，下移半高使面板顶部与窗口上沿贴齐。
+    self:SetPosition(0, -78)
     self.background = self:AddChild(Image("images/global.xml", "square.tex"))
     self.background:SetSize(340, 156)
     self.background:SetTint(0.07, 0.09, 0.11, 0.88)
