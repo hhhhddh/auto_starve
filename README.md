@@ -12,6 +12,7 @@
 | `.pi/extensions/wilson-iteration.js` | 可选的 Pi 死亡/控制器故障通知扩展 |
 | `.pi/runtime-recovery` | 已保留的离线回归，直接执行本机原版 Lua 方法作校验 |
 | `handoff/iterations.json` | 脱敏后的三轮证据结论、优化和验证范围 |
+| `mods/WilsonExpedition/OPTIMIZATIONS.md` | 随 Mod 安装的优化历史、验证结果和后续核查项 |
 | `AGENTS.md` | 接手 AI 的状态、职责边界、技术约束和后续工作 |
 
 ## 环境
@@ -37,7 +38,7 @@ python development-support/nbot-relay/iteration.py prepare
 
 `configure` 写入被 Git 忽略的 `deployment.local.json`。默认专属测试存储位于仓库的 `.local/dst`，也可通过 `--storage-root` 指定一个专用目录。`deployment.example.json` 展示完整字段。安装和准备步骤不启动游戏。
 
-`install` 从仓库安装两个 Mod。遇到同名的其他部署或已安装目录含额外 Lua 文件时会停止；明确需要替换时使用 `python deploy.py install --replace-existing`，原目录会完整移到 `.local/deployment-backups` 保留，再安装当前 checkout。每次修改仓库中的 Mod 后，都需要再次运行 `install`，控制器会核对已安装源码与当前 checkout 一致。
+`install` 从仓库安装两个 Mod，并同步 Mod 目录内的 Markdown 优化记录。遇到同名的其他部署或已安装目录含额外 Lua 文件时会停止；明确需要替换时使用 `python deploy.py install --replace-existing`，原目录会完整移到 `.local/deployment-backups` 保留，再安装当前 checkout。每次修改仓库中的 Mod 后，都需要再次运行 `install`，控制器会核对已安装源码与当前 checkout 一致。
 
 `prepare` 通过当前 Steam 注册表确定测试账号，自动生成隔离客户端、管理员列表、无尽世界和原版四季配置。所有本机身份与路径保存在被忽略的 `private`、`.local` 目录中；应保留这些目录为本机运行资料。
 
@@ -74,7 +75,7 @@ python development-support/nbot-relay/iteration.py stop
 
 ### 获准的修复与下一轮
 
-只有用户明确授权死亡驱动迭代时，才省略 `--capture-only` 启动。在死亡后核验队列和归档完整性，完成源码修复、安装和检查，再执行：
+只有用户明确授权死亡驱动迭代时，才省略 `--capture-only` 启动。在死亡后核验队列和归档完整性，完成源码修复、更新 `mods/WilsonExpedition/OPTIMIZATIONS.md`，再安装并检查后执行：
 
 ```powershell
 python deploy.py install

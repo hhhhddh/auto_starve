@@ -55,13 +55,14 @@ def install(args):
     plans = []
     for name in MODS:
         source, target = PROJECT / "mods" / name, game / "mods" / name
-        files = sorted(source.rglob("*.lua"))
-        if not files:
+        lua_files = sorted(source.rglob("*.lua"))
+        if not lua_files:
             raise ValueError("Mod source is missing: " + name)
+        files = sorted(lua_files + list(source.rglob("*.md")))
         marker = target / MARKER
         previous = json.loads(marker.read_text(encoding="utf-8")) if marker.exists() else {}
         owned = previous.get("project") == str(PROJECT)
-        expected = {file.relative_to(source) for file in files}
+        expected = {file.relative_to(source) for file in lua_files}
         extra = {file.relative_to(target) for file in target.rglob("*.lua")} - expected
         needs_backup = target.exists() and (not owned or bool(extra))
         if needs_backup and not args.replace_existing:

@@ -246,7 +246,51 @@ def check_navigation_cancellation():
         ''')
 
 
+def check_collision_arrival_contract():
+    native = (baseline.NATIVE_SCRIPTS / "components/locomotor.lua").read_text(encoding="utf-8-sig")
+    destination = native[native.index("Dest = Class("):native.index("function Dest:GetPlatform()")]
+    for mode in ("host", "remote_prediction", "remote_no_prediction"):
+        lua = fixture(mode)
+        lua.execute(destination)
+        baseline.native_method(lua, "components/locomotor.lua", "LocoMotor", "GoToEntity")
+        lua.execute('''
+            local obstacle = entity(100, "rock", {})
+            obstacle.components = {}
+            obstacle.Transform = { GetWorldPosition = function() return 10, 0, 0 end }
+            obstacle.GetPhysicsRadius = function() return 2 end
+            loco:GoToEntity(obstacle, nil, true)
+            assert(math.abs(loco.arrive_dist - (ARRIVE_STEP + 2 + player:GetPhysicsRadius())) < 0.000001,
+                "native entity approaches must include both collision radii")
+            loco:Clear()
+            local point = BufferedAction(player, nil, ACTIONS.WALKTO, nil, Vector3(10, 0, 0),
+                nil, nil, nil, nil, 1.5)
+            loco:GoToPoint(nil, point, true)
+            assert(loco.arrive_dist == 1.5, "explicit point arrival must not acquire entity radii")
+            x = 8.6
+            loco:OnUpdate(0, true)
+            assert(loco.dest == nil, "native point walking must accept a position within the explicit range")
+        ''')
+
+        lua = fixture(mode)
+        lua.execute('''
+            goal = { x = 10, z = 0, range = 1.5, id = "occupied_point" }
+            -- [喵喵喵]: 固定在合计碰撞半径以外，验证停滞位置不能被回报为已到达；不模拟引擎碰撞。
+            x = goal.x - (player:GetPhysicsRadius() + 2 + 0.01)
+            local status, reason = Navigation.Step(player, snapshot_at(), state, goal)
+            assert(status == "pending", "position outside point arrival range must remain pending")
+            for i = 1, 600 do
+                clock = clock + 0.5
+                status, reason = Navigation.Step(player, snapshot_at(), state, goal)
+                assert(status ~= "succeeded", "a blocked position outside the range must never report arrival")
+                if status == "failed" then break end
+            end
+            assert(status == "failed", "immobility must exhaust retries rather than navigate forever")
+            assert(state.nav.closed.status == "failed")
+        ''')
+
+
 if __name__ == "__main__":
-    for check in (check_native_route_handoff, check_unsafe_shortcuts, check_navigation_cancellation):
+    for check in (check_native_route_handoff, check_unsafe_shortcuts, check_navigation_cancellation,
+                  check_collision_arrival_contract):
         check()
         print("PASS", check.__name__)

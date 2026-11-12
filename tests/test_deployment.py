@@ -51,6 +51,8 @@ def check():
         source = checkout / "mods/WilsonExpedition/modinfo.lua"
         installed = game / "mods/WilsonExpedition/modinfo.lua"
         assert installed.read_bytes() == source.read_bytes()
+        history = Path("mods/WilsonExpedition/OPTIMIZATIONS.md")
+        assert (game / history).read_bytes() == (checkout / history).read_bytes(), "optimization history must be installed"
         receipt = game / "mods/WilsonExpedition/.auto-starve-deployment.json"
         value = json.loads(receipt.read_text())
         value["project"] = "different-checkout"
@@ -96,8 +98,11 @@ print(json.dumps({"prepared": True, "validation": report["validation"]}))
         stale = probe.split("with patch(", 1)[0] + "iteration.check_sources()\n"
         result = run(checkout, ["-c", stale, str(checkout)], expected=1)
         assert "Installed Mod source is stale" in result.stderr
+        history_source = checkout / history
+        history_source.write_text(history_source.read_text(encoding="utf-8") + "\n## Deployment history update\n", encoding="utf-8")
         run(checkout, ["deploy.py", "install"])
         run(checkout, ["-c", stale, str(checkout)])
+        assert (game / history).read_bytes() == history_source.read_bytes(), "later optimization records must be synchronized"
 
         subprocess.run(["git", "init", "-q", str(checkout)], check=True, capture_output=True, timeout=15)
         relative_files = ["deployment.local.json", ".local/dst/example",
