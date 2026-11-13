@@ -633,7 +633,8 @@ local function reset_request(rt, key, request)
     rt.fail_total = 0
     rt.cmd = nil
     rt.arrived = {}
-    rt.stale = {}
+    -- [喵喵喵]: 同分片空点和不可达点的冷却跨采购保留；换世界仍整体重置。 (2026-11-12)
+    rt.stale = rt.stale or {}
     rt.bad = {}
     rt.gave_up = nil
 end
@@ -962,7 +963,8 @@ local function plan_landmark(snapshot, rt, item, dark)
         local entry = entries[i]
         local key = landmark_key(entry)
         if available[key] == false then mark_stale(rt, key) end
-        if rt.stale[key] == nil then
+        -- [喵喵喵]: 采空结论来自可见实体并随Observer记忆保存；重新看见长好后才恢复来源。 (2026-11-12)
+        if rt.stale[key] == nil and not (pick_sources[entry.prefab] and entry.pickable == false) then
             local d = math.sqrt(dist2(px, pz, entry.x, entry.z))
             local arrived = rt.arrived[key]
             if arrived ~= nil then
@@ -1060,8 +1062,21 @@ local function plan_fallback(player, snapshot, state, rt, item, dark)
     if dark then
         return nil, "night_light_reserve:explore:" .. item
     end
-    -- [喵喵喵]: 手边和记忆里都没有 → 交给探索层挑一个前沿，回执由 Report 转发回去。
-    local goal, gwhy = Exploration.Next(player, snapshot, state)
+    -- [喵喵喵]: 基本口粮和随身照明有余量后才规划地形；饥荒、首份照明及备灯期限保持原有近处救急路径。 (2026-11-13)
+    local stocked_light = false
+    for _, prefab in ipairs({ "torch", "lantern", "minerhat" }) do
+        local record = first_owned_record(snapshot, prefab, COUNTED_KINDS)
+        if record ~= nil and is_valid(record.entity) and not record.entity:HasTag("fueldepleted") then
+            stocked_light = true
+            break
+        end
+    end
+    local resource = stocked_light and snapshot.shard_kind == "surface"
+        and is_finite_number(snapshot.hunger) and snapshot.hunger > 0.35
+        and is_finite_number(snapshot.health) and snapshot.health > 0.35
+        and is_finite_number(snapshot.time_until_night) and snapshot.time_until_night > Supplies.PLAN_TIMEOUT
+        and item or nil
+    local goal, gwhy = Exploration.Next(player, snapshot, state, resource)
     if type(goal) == "table" then
         return make_explore_command(rt, "explore|" .. item, "explore:" .. item, goal), nil
     end
@@ -1208,6 +1223,32 @@ local function work_targets(snapshot, rt, work)
         return a.distance < b.distance
     end)
     return result
+end
+
+local function work_tool_ready(player, snapshot, work)
+    if count_owned(snapshot, work.tool) >= 1 then return true end
+    local recipe = get_recipe(CRAFT_RECIPES[work.tool])
+    local builder = get_builder(player)
+    return recipe ~= nil and builder ~= nil
+        and (builder_call(builder, "IsBuildBuffered", recipe.name) == true
+            or builder_call(builder, "HasIngredients", recipe) == true)
+end
+
+-- [喵喵喵]: 现成采掘能力与地面来源一起比较，避免总追远处散落物；首把工具仍须原生配料足够。 (2026-11-13)
+local function nearest_visible_source(player, snapshot, rt, item)
+    local best = visible_candidates(snapshot, rt, item)[1]
+    local work = WORK_SOURCES[item]
+    local hands = equipped_record(snapshot, "hands")
+    if work ~= nil and work_tool_ready(player, snapshot, work)
+        and not ((snapshot.phase == "night" or snapshot.shard_kind == "cave")
+            and hands ~= nil and Supplies.LIGHT_ITEMS[hands.prefab]) then
+        local target = work_targets(snapshot, rt, work)[1]
+        if target ~= nil and (best == nil or (best.distance > Supplies.ACTION_RANGE
+            and target.distance < best.distance)) then
+            return target, true
+        end
+    end
+    return best, false
 end
 
 --------------------------------------------------------------------------
@@ -1817,12 +1858,42 @@ local function ensure_tool(player, snapshot, state, rt, tool, depth, path, craft
     return nil, why or ("need_tool:" .. tostring(tool))
 end
 
+local function physical_radius(entity)
+    return entity.Physics ~= nil and entity.Physics:GetRadius() or 0
+end
+
+-- [喵喵喵]: 预接近走目标外缘而非碰撞中心；最后一段仍交给原版目标动作计算双方半径。 (2026-11-13)
+local function work_approach(player, snapshot, target, radius)
+    local map = get_map()
+    if FindWalkableOffset == nil or map == nil or map.IsPointNearHole == nil then
+        return nil, nil, "work_approach_query_unavailable"
+    end
+    local position = Vector3(target.x, 0, target.z)
+    local angle = math.atan2(target.z - snapshot.z, snapshot.x - target.x)
+    local offset = FindWalkableOffset(position, angle, radius, 8, false, false, function(point)
+        if terrain_land(point.x, point.z) ~= true or threat_safe(snapshot, point.x, point.z) ~= true
+            or map:IsPointNearHole(point) ~= false then return false end
+        -- [喵喵喵]: 只用已见碰撞体排除被矿石/邻树占据的落点；整段通路仍由Navigation检查。 (2026-11-13)
+        for _, record in ipairs(snapshot.nearby or {}) do
+            local entity = record.entity
+            if is_valid(entity) and entity:HasTag("blocker") then
+                local x, z = get_xz(entity)
+                local clearance = physical_radius(entity) + physical_radius(player) + 0.25 + 0.1
+                if x ~= nil and dist2(x, z, point.x, point.z) < clearance * clearance then return false end
+            end
+        end
+        return true
+    end, false, false, true)
+    if offset == nil then return nil, nil, "work_approach_blocked" end
+    return target.x + offset.x, target.z + offset.z
+end
+
 -- [喵喵喵]: 同一目标由 Actions 维持原版连续工作；等作业完成再由持有量确认材料是否到手。 (2026-11-11)
 local function plan_work(player, snapshot, state, rt, item, work, depth, path, dark, crafts)
     local targets = work_targets(snapshot, rt, work)
     if #targets == 0 then return nil, "no_candidate" end
-    -- [喵喵喵]: 首把镐的燧石只能拾取，不能递归要求用尚未做出的镐采燧石。 (2026-11-11)
-    if item == "flint" and count_owned(snapshot, work.tool) < 1 then return nil, "no_candidate" end
+    -- [喵喵喵]: 首把镐不能依赖挖矿取得自身配料；已有两份燧石等原生配料时可先制镐再采矿。 (2026-11-13)
+    if item == "flint" and not work_tool_ready(player, snapshot, work) then return nil, "no_candidate" end
     if (snapshot.phase == "night" or snapshot.shard_kind == "cave") and equipped_record(snapshot, "hands") ~= nil
         and Supplies.LIGHT_ITEMS[equipped_record(snapshot, "hands").prefab] then
         return nil, "work_requires_stationary_light"
@@ -1833,7 +1904,8 @@ local function plan_work(player, snapshot, state, rt, item, work, depth, path, d
     local best = targets[1]
     local stage = string.format("work|%s|%s", tostring(work.act), tostring(best.guid))
     local purpose = string.format("work:%s@%s", item, tostring(best.prefab))
-    if best.distance <= Supplies.ACTION_RANGE then
+    local stand_radius = physical_radius(player) + physical_radius(best.entity) + 0.5
+    if best.distance <= math.max(Supplies.ACTION_RANGE, stand_radius + 0.25) then
         local cmd = make_actions_command(rt, stage, purpose, {
             kind = "action",
             action = work.act,
@@ -1847,9 +1919,10 @@ local function plan_work(player, snapshot, state, rt, item, work, depth, path, d
     if dark then
         return nil, "night_light_reserve:" .. purpose
     end
+    local x, z, reason = work_approach(player, snapshot, best, stand_radius)
+    if x == nil then return nil, reason end
     local cmd = make_navigation_command(rt, "approach|" .. stage,
-        string.format("approach:%s@%s", item, tostring(best.prefab)),
-        best.x, best.z, Supplies.APPROACH_RANGE)
+        string.format("approach:%s@%s", item, tostring(best.prefab)), x, z, 0.25)
     cmd.target_guid = best.guid
     cmd.target_x, cmd.target_z = best.x, best.z
     return cmd, nil
@@ -2004,6 +2077,26 @@ local function plan_craft(player, snapshot, state, rt, recipe_name, depth, path,
     -- [喵喵喵]: 放置缓冲已扣材料；不能再次索要同一批材料。 (2026-11-11)
     local buffered = builder_call(builder, "IsBuildBuffered", recipe_name) == true
     local ingredients = not buffered and type(recipe.ingredients) == "table" and recipe.ingredients or {}
+    -- [喵喵喵]: 先收集当前可见的缺料，避免配方首项稀缺时忽略沿途其它原料；只提交选中的命令，不预先推进多个探索目标。 (2026-11-12)
+    for _, ingredient in ipairs(ingredients) do
+        if type(ingredient) == "table" and type(ingredient.type) == "string" then
+            local need = ingredient_need(builder, ingredient)
+            if need ~= nil and count_owned(snapshot, ingredient.type) < need and depth < Supplies.MAX_STEPS then
+                local source, working = nearest_visible_source(player, snapshot, rt, ingredient.type)
+                if source ~= nil then
+                    local dark = is_dark(snapshot) and Supplies.LIGHT_ITEMS[ingredient.type] ~= true
+                    local cmd
+                    if working then
+                        cmd = plan_work(player, snapshot, state, rt, ingredient.type,
+                            WORK_SOURCES[ingredient.type], depth + 1, path, dark, crafts)
+                    else
+                        cmd = plan_visible_pickup(player, snapshot, rt, ingredient.type, dark)
+                    end
+                    if cmd ~= nil then return cmd, nil end
+                end
+            end
+        end
+    end
     for i = 1, #ingredients do
         local ingredient = ingredients[i]
         if type(ingredient) == "table" and type(ingredient.type) == "string" then
@@ -2015,9 +2108,7 @@ local function plan_craft(player, snapshot, state, rt, recipe_name, depth, path,
                         return nil, string.format("steps_exhausted:%s|%s", tostring(recipe_name), ingredient.type)
                     end
                     local cmd, why = plan_item(player, snapshot, state, rt, ingredient.type, depth + 1, path, nil, crafts)
-                    if cmd ~= nil then
-                        return cmd, nil
-                    end
+                    if cmd ~= nil then return cmd, nil end
                     return nil, string.format("need_ingredient:%s:%d/%d|%s",
                         ingredient.type, have, need, tostring(why))
                 end
@@ -2114,6 +2205,12 @@ local function choose_item_step(player, snapshot, state, rt, item, depth, path, 
     end
 
     -- 2) 看得见的拾取/采集
+    -- [喵喵喵]: 已具备工具或其配料时，近处采掘来源可先于远处拾取；失败仍可尝试地面来源。 (2026-11-13)
+    local _, working = nearest_visible_source(player, snapshot, rt, item)
+    if working then
+        local cmd = plan_work(player, snapshot, state, rt, item, WORK_SOURCES[item], depth, path, dark, crafts)
+        if cmd ~= nil then return cmd, nil end
+    end
     local cmd, why = plan_visible_pickup(player, snapshot, rt, item, dark)
     if cmd ~= nil then
         return cmd, nil
@@ -2178,6 +2275,146 @@ end
 --------------------------------------------------------------------------
 -- [喵喵喵] 对外接口一：决定下一步。绝不执行、绝不下发。
 --------------------------------------------------------------------------
+
+local function partial_stack_room(snapshot, item, candidate)
+    local room = 0
+    for _, record in ipairs(snapshot.inventory and snapshot.inventory.records or {}) do
+        local stack = is_valid(record.entity) and record.entity.replica and record.entity.replica.stackable
+        if record.prefab == item and COUNTED_KINDS[record.kind] and stack
+            and stack.MaxSize ~= nil and stack.StackSize ~= nil then
+            local maximum, current = stack:MaxSize(), stack:StackSize()
+            if is_finite_number(maximum) and is_finite_number(current) and maximum > current and current > 0
+                and (candidate.act ~= "PICKUP" or (stack.CanStackWith ~= nil and stack:CanStackWith(candidate.entity))) then
+                room = math.max(room, maximum - current)
+            end
+        end
+    end
+    return room
+end
+
+-- [喵喵喵]: 只读展开当前缺口并比较近处机会，不下发命令、不切换探索目标；共享原料合并，库存取下限。 (2026-11-13)
+function Supplies.NearbyRequest(player, snapshot, state, requests, primary)
+    if snapshot.platform ~= nil or snapshot.ghost == true or is_dark(snapshot) then return nil end
+    local builder = get_builder(player)
+    local recipe = primary and get_recipe(CRAFT_RECIPES[primary.item] or primary.item)
+    if recipe ~= nil and (builder_call(builder, "IsBuildBuffered", recipe.name) == true
+        or (builder_call(builder, "HasIngredients", recipe) == true
+            and (builder_call(builder, "KnowsRecipe", recipe) == true
+                or (builder_call(builder, "CanLearn", recipe.name) == true
+                    and can_prototype(recipe.level, builder_call(builder, "GetTechTrees")))))) then
+        return nil
+    end
+    local rt = state.supplies
+    if type(rt) ~= "table" or rt.world ~= world_key_of(snapshot) then
+        rt = { bad = {}, stale = {}, stations = {} }
+    end
+    local roots, available, missing, targets = {}, {}, {}, {}
+    for _, request in ipairs(requests) do
+        local item = ITEM_ALIASES[request.item] or request.item
+        roots[item] = math.max(roots[item] or 0, request.count)
+    end
+    local function owned(item)
+        return count_owned(snapshot, item)
+    end
+    local expand
+    local stations = { researchlab = roots.researchlab ~= nil, researchlab2 = roots.researchlab2 ~= nil }
+    local tools = {}
+    -- [喵喵喵]: 已作为根需求的科技台和工具会单独展开，其他配方只复用该份准备。 (2026-11-12)
+    for _, work in pairs(WORK_SOURCES) do
+        if roots[work.tool] ~= nil then tools[work.tool] = true end
+    end
+    expand = function(item, amount, depth, path)
+        if depth > Supplies.MAX_DEPTH or path[item] then return end
+        if available[item] == nil then
+            available[item] = PLACED_ITEMS[item] and count_placed(snapshot, item) or owned(item)
+        end
+        local taken = math.min(available[item], amount)
+        available[item] = available[item] - taken
+        local deficit = amount - taken
+        if deficit <= 0 then return end
+        local recipe = get_recipe(item)
+        if recipe ~= nil and CRAFT_RECIPES[item] ~= nil then
+            path[item] = true
+            local output = is_finite_number(recipe.numtogive) and math.max(1, recipe.numtogive) or 1
+            local crafts = math.ceil(deficit / output)
+            if builder_call(builder, "IsBuildBuffered", recipe.name) == true then crafts = math.max(0, crafts - 1) end
+            for _, ingredient in ipairs(recipe.ingredients or {}) do
+                local amount = ingredient_need(builder, ingredient)
+                if amount ~= nil then expand(ingredient.type, amount * crafts, depth + 1, path) end
+            end
+            if crafts > 0 and builder_call(builder, "KnowsRecipe", recipe) ~= true
+                and not can_prototype(recipe.level, builder_call(builder, "GetTechTrees")) then
+                local science = type(recipe.level) == "table" and recipe.level.SCIENCE or 0
+                if science > 0 and science <= 2 then
+                    local station = science >= 2 and "researchlab2" or "researchlab"
+                    if not stations[station] then
+                        stations[station] = true
+                        if nearest_station(snapshot, rt, science) == nil then expand(station, 1, depth + 1, path) end
+                    end
+                end
+            end
+            path[item] = nil
+        elseif COOK_SOURCES[item] ~= nil then
+            expand(COOK_SOURCES[item].from, deficit, depth + 1, path)
+        else
+            missing[item] = (missing[item] or 0) + deficit
+            local work = WORK_SOURCES[item]
+            if work ~= nil and owned(work.tool) < 1 and not tools[work.tool] then
+                tools[work.tool] = true
+                path[item] = true
+                expand(work.tool, 1, depth + 1, path)
+                path[item] = nil
+            end
+        end
+    end
+    local items = {}
+    for item in pairs(roots) do items[#items + 1] = item end
+    table.sort(items)
+    for _, item in ipairs(items) do
+        if CRAFT_RECIPES[item] ~= nil or COOK_SOURCES[item] ~= nil then
+            expand(item, roots[item], 0, {})
+        else
+            targets[item] = roots[item]
+            local work = WORK_SOURCES[item]
+            if owned(item) < roots[item] and work ~= nil and owned(work.tool) < 1 and not tools[work.tool] then
+                tools[work.tool] = true
+                expand(work.tool, 1, 1, { [item] = true })
+            end
+        end
+    end
+    for item, deficit in pairs(missing) do targets[item] = math.max(targets[item] or 0, owned(item) + deficit) end
+    -- [喵喵喵]: 已有原料的未满堆叠只登记顺手机会，不为补堆叠制作、烹饪或新增远行目标。 (2026-11-13)
+    local topup = is_finite_number(snapshot.hunger) and snapshot.hunger > 0.35
+        and is_finite_number(snapshot.health) and snapshot.health > 0.35
+    if topup then
+        for _, record in ipairs(snapshot.inventory and snapshot.inventory.records or {}) do
+            if COUNTED_KINDS[record.kind] and record.prefab ~= "seeds" and record.prefab ~= "seeds_cooked"
+                and CRAFT_RECIPES[record.prefab] == nil and COOK_SOURCES[record.prefab] == nil
+                and is_supported(record.prefab) then targets[record.prefab] = targets[record.prefab] or owned(record.prefab) end
+        end
+    end
+    items = {}
+    for item in pairs(targets) do items[#items + 1] = item end
+    table.sort(items)
+    local best
+    for _, item in ipairs(items) do
+        local target = math.min(Supplies.MAX_COUNT, targets[item])
+        local candidate = nearest_visible_source(player, snapshot, rt, item)
+        local body = equipped_record(snapshot, "body")
+        if item == "cactus_meat" and (body == nil or body.prefab ~= "armorwood") then candidate = nil end
+        if candidate ~= nil then
+            local stack_room = partial_stack_room(snapshot, item, candidate)
+            if topup and candidate.distance <= Supplies.ACTION_RANGE then
+                target = math.min(Supplies.MAX_COUNT, math.max(target, owned(item) + stack_room))
+            end
+            if owned(item) < target and (best == nil or candidate.distance < best.distance)
+                and (inventory_full(player) ~= true or stack_room > 0) then
+                best = { item = item, count = target, guid = candidate.guid, distance = candidate.distance }
+            end
+        end
+    end
+    return best
+end
 
 function Supplies.Plan(player, snapshot, state, request)
     if type(state) ~= "table" then

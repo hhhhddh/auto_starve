@@ -116,7 +116,10 @@ def test():
     environment = dict(os.environ, DST_GAME_DIR=str(project_paths.game_dir()), DST_SCRIPTS_DIR=str(native))
     tests = ("check-death-iteration.py", "check-continuous-work.py", "check-move-continuity.py",
              "check-empty-landmarks.py", "check-threat-retreat.py", "check-tallbird-awareness.py",
-             "check-world-pause.py", "check-paused-reset.py", "check-state-replace.py")
+             "check-bee-awareness.py", "check-light-budget.py", "check-starvation-priority.py",
+             "check-retreat-reachability.py", "check-swarmed-retreat.py", "check-exploration-memory.py",
+             "check-stock-batching.py", "check-spider-web-navigation.py", "check-pigguard-awareness.py", "check-screen-food-memory.py", "check-famine-fallback.py", "check-first-light-supplies.py",
+             "check-nearby-demands.py", "check-terrain-planning.py", "check-pig-pursuit.py", "check-multisource-food.py", "check-seed-mining-stacks.py", "check-retreat-legs.py", "check-escape-recovery.py", "check-task-panel.py", "check-world-pause.py", "check-paused-reset.py", "check-state-replace.py")
     for name in tests:
         subprocess.run([sys.executable, "-B", str(PROJECT / ".pi/runtime-recovery" / name)],
                        cwd=PROJECT, env=environment, check=True, timeout=45)

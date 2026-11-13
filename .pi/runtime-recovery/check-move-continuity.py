@@ -43,7 +43,8 @@ def fixture(mode="remote_prediction", steps=None):
         TheWorld.Map.GetTileCoordsAtPoint = function() return 0, 0 end
         TheWorld.Pathfinder = {
             IsClear = function(_, px, _, pz, gx, _, gz, caps)
-                assert(caps == nil, "native walking uses default land path capabilities")
+                assert(caps == nil or (caps.ignorecreep == true and next(caps, "ignorecreep") == nil
+                    and next(caps) == "ignorecreep"), "only walkable creep may be excluded from land obstacles")
                 if px == 0 and pz == 0 and gx == 30 and gz == 0 then return false end
                 if line_unknown then error("path visibility unavailable") end
                 return not obstacles
@@ -127,7 +128,7 @@ def fixture(mode="remote_prediction", steps=None):
             end
         end
     ''')
-    native_root = baseline.NATIVE_SCRIPTS
+    native_root = baseline.GAME / "data/databundles/scripts"
     lua.execute((native_root / "bufferedaction.lua").read_text(encoding="utf-8"))
     for method in ("DoAction",):
         baseline.native_method(lua, "components/playercontroller.lua", "PlayerController", method)
@@ -247,7 +248,7 @@ def check_navigation_cancellation():
 
 
 def check_collision_arrival_contract():
-    native = (baseline.NATIVE_SCRIPTS / "components/locomotor.lua").read_text(encoding="utf-8-sig")
+    native = (baseline.GAME / "data/databundles/scripts/components/locomotor.lua").read_text(encoding="utf-8-sig")
     destination = native[native.index("Dest = Class("):native.index("function Dest:GetPlatform()")]
     for mode in ("host", "remote_prediction", "remote_no_prediction"):
         lua = fixture(mode)

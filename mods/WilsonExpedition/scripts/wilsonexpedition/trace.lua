@@ -56,11 +56,16 @@ function Trace.Sample(runtime, force)
         runtime.last_inventory, runtime.last_equipment = inventory, equipment
     end
     local light = snapshot.light or {}
+    local state = runtime.state or {}
+    local worlds = state.explore_memory and state.explore_memory.worlds
+    local coverage = worlds and state.explore and worlds[state.explore.world_key]
     local entry = {
         tick = now, cycles = snapshot.cycles, time = snapshot.time, phase = snapshot.phase,
         light = { available = light.available, in_light = light.in_light, dark = light.dark, level = light.level,
             ambient = light.ambient, threshold = light.threshold },
-        time_until_night = snapshot.time_until_night, shard_kind = snapshot.shard_kind,
+        time_until_night = snapshot.time_until_night, time_until_day = snapshot.time_until_day,
+        precipitation_rate = snapshot.precipitation_rate, explored_cells = coverage and coverage.n_cells,
+        shard_kind = snapshot.shard_kind,
         season = snapshot.season, shard = snapshot.shard, session = snapshot.session,
         health = snapshot.health, hunger = snapshot.hunger, sanity = snapshot.sanity,
         temperature = snapshot.temperature, moisture = snapshot.moisture,
@@ -84,7 +89,7 @@ function Trace.Seal(runtime, cause)
         challenge = record and record.id, userid = runtime.player.userid,
         session = runtime.snapshot and runtime.snapshot.session,
         shard = runtime.snapshot and runtime.snapshot.shard,
-        cause = cause, mod_version = "0.1.5", revision = Revision, record = record,
+        cause = cause, mod_version = "0.1.6", revision = Revision, record = record,
         server_receipt = runtime.player._wilsonexpedition_server,
         inventory = runtime.last_inventory, equipment = runtime.last_equipment,
         game_build = rawget(_G, "APP_VERSION") or "unknown",

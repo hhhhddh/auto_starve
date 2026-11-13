@@ -69,17 +69,15 @@ local Observer = {}
 
 Observer.SCHEMA_VERSION = 1
 
--- [喵喵喵] 观测预算：附近实体半径/条数、地标半径/条数、海岸探测参数。
+-- [喵喵喵]: 地形探测与动作接近预算；可见实体范围由当前屏幕投影确定。 (2026-11-12)
 Observer.NEARBY_RADIUS = 20
-Observer.NEARBY_LIMIT = 64
-Observer.LANDMARK_RADIUS = 30
-Observer.LANDMARK_LIMIT = 32
 Observer.SHORE_PROBE_RADIUS = 12
 Observer.SHORE_PROBE_COUNT = 8
 Observer.LIGHT_THRESHOLD = 0.1
 
 -- [喵喵喵] 记忆预算：每分片每类别条目上限、分片数上限、去重网格边长(世界单位)。
-Observer.MEMORY_ENTRIES_PER_CATEGORY = 48
+-- [喵喵喵]: 受控简化 — 每类保留最近512个已见网格；边界：最多4分片；升级：容量饱和且发生遗漏 → 分区存储。 (2026-11-12)
+Observer.MEMORY_ENTRIES_PER_CATEGORY = 512
 Observer.MEMORY_MAX_SHARDS = 4
 Observer.MEMORY_GRID = 4
 
@@ -144,6 +142,12 @@ local THREAT_PREFABS = {
     clockwork_bishop = true,
     -- [喵喵喵]: tallbird 原版仅有 animal/tallbird 标签，但会主动索敌玩家，不能依赖 hostile 标签。 (2026-11-12)
     tallbird = true,
+    -- [喵喵喵]: 杀人蜂与近身放蜂的蜂巢均无 hostile 标签，必须在进入索敌区前识别。 (2026-11-12)
+    killerbee = true,
+    wasphive = true,
+    -- [喵喵喵]: 守卫和它保护的猪火炬均无 hostile；火炬会在守卫未靠近玩家时触发索敌。 (2026-11-12)
+    pigguard = true,
+    pigtorch = true,
     shadow_knight = true,
     shadow_bishop = true,
     shadow_rook = true,
@@ -694,7 +698,8 @@ end
 local EXCLUDE_TAGS = { "INLIMBO", "FX", "DECOR", "NOCLICK" }
 
 local RESOURCE_TAGS = { "tree", "bush", "rock", "mineable", "pickable", "plant", "harvestable" }
-local THREAT_TAGS = { "hostile", "epic", "shadowthrall" }
+-- [喵喵喵]: 普通猪变疯只加 werepig，未添加 hostile；月猪虽复用 pigman 显示名，原版保留 hostile。 (2026-11-13)
+local THREAT_TAGS = { "hostile", "epic", "shadowthrall", "werepig" }
 
 -- [喵喵喵] 分类只依赖客户端可见的 prefab 名与标签，不猜测服务端组件。
 local function classify(inst, categories)
@@ -740,80 +745,96 @@ local function is_threat(inst)
     return has_any_tag(inst, THREAT_TAGS)
 end
 
-local function collect_nearby(player, x, y, z)
-    local nearby = {}
-    local threats = {}
-    local landmarks = {}
-
-    -- [喵喵喵] 只查询一次，半径取两者较大值；附近/威胁再按 NEARBY_RADIUS 过滤，地标按 LANDMARK_RADIUS 过滤。
-    local query_radius = Observer.NEARBY_RADIUS
-    if Observer.LANDMARK_RADIUS > query_radius then
-        query_radius = Observer.LANDMARK_RADIUS
+local function screen_view(x, z)
+    if TheSim == nil or TheSim.GetScreenSize == nil or TheSim.ProjectScreenPos == nil then return nil end
+    local w, h = TheSim:GetScreenSize()
+    if as_number(w) == nil or as_number(h) == nil or w <= 0 or h <= 0 then return nil end
+    local radius = 0
+    for _, point in ipairs({ { 0, 0 }, { w, 0 }, { 0, h }, { w, h } }) do
+        local px, _, pz = TheSim:ProjectScreenPos(point[1], point[2])
+        if as_number(px) == nil or as_number(pz) == nil then return nil end
+        local dx, dz = px - x, pz - z
+        radius = math.max(radius, math.sqrt(dx * dx + dz * dz))
     end
+    -- [喵喵喵]: 投影覆盖地面，再纳入一个相机距离容纳边缘高大实体；实际观测仍受引擎视锥和原版视力约束。 (2026-11-12)
+    local distance = TheCamera ~= nil and TheCamera.GetDistance ~= nil and TheCamera:GetDistance() or 0
+    return { width = w, height = h, radius = radius + (as_number(distance) or 0) }
+end
 
-    local ents = try(function()
-        return TheSim:FindEntities(x, y, z, query_radius, nil, EXCLUDE_TAGS)
-    end)
-    if type(ents) ~= "table" then
-        return nearby, threats, landmarks
+local function point_visible(player, view, x, y, z)
+    if view == nil or type(CanEntitySeePoint) ~= "function" or TheSim.GetScreenPos == nil then return false end
+    local sx, sy = TheSim:GetScreenPos(x, y, z)
+    return as_number(sx) ~= nil and as_number(sy) ~= nil
+        and sx >= 0 and sx <= view.width and sy >= 0 and sy <= view.height
+        and CanEntitySeePoint(player, x, y, z) == true
+end
+
+-- [喵喵喵]: 地形知识只能来自画面内且原版视力允许看见的地面，不能读取整张已加载地图。 (2026-11-13)
+function Observer.TerrainAtPoint(player, snapshot, x, z)
+    local map = TheWorld ~= nil and TheWorld.Map or nil
+    if map == nil or map.GetTileAtPoint == nil or TheSim == nil
+        or not point_visible(player, snapshot.view, x, 0, z) then
+        return nil
     end
+    if map.IsPassableAtPoint == nil or not map:IsPassableAtPoint(x, 0, z)
+        or (map.IsOceanAtPoint ~= nil and map:IsOceanAtPoint(x, 0, z)) then
+        return nil
+    end
+    return as_number(map:GetTileAtPoint(x, 0, z))
+end
 
+local function collect_terrain(player, snapshot)
+    local points = {}
+    local view = snapshot.view
+    if view == nil then return points end
+    for row = 0, 4 do
+        for col = 0, 4 do
+            local x, _, z = TheSim:ProjectScreenPos(view.width * col / 4, view.height * row / 4)
+            if as_number(x) ~= nil and as_number(z) ~= nil then
+                local tile = Observer.TerrainAtPoint(player, snapshot, x, z)
+                if tile ~= nil then points[#points + 1] = { x = x, z = z, tile = tile } end
+            end
+        end
+    end
+    return points
+end
+
+local function collect_nearby(player, x, y, z, view)
+    local nearby, threats, landmarks = {}, {}, {}
+    if view == nil or type(CanEntitySeeTarget) ~= "function" then return nearby, threats, landmarks end
+    local ents = TheSim:FindEntities(x, y, z, view.radius, nil, EXCLUDE_TAGS) or {}
     for i = 1, #ents do
         local ent = ents[i]
-        if ent ~= player and is_valid(ent) then
+        if ent ~= player and is_valid(ent) and ent.entity ~= nil and ent.entity.FrustumCheck ~= nil
+            and ent.entity:FrustumCheck() and ent.entity.IsVisible ~= nil and ent.entity:IsVisible()
+            and CanEntitySeeTarget(player, ent) then
             local ex, ey, ez = get_pos(ent)
-            local record = {
-                entity = ent,
-                guid = ent.GUID,
-                prefab = ent.prefab,
-                distance = nil,
-                x = ex,
-                y = ey,
-                z = ez,
-                threat = is_threat(ent),
-            }
             if ex ~= nil and ez ~= nil then
                 local dx, dz = ex - x, ez - z
-                record.distance = math.sqrt(dx * dx + dz * dz)
-            end
-
-            local in_nearby = record.distance ~= nil and record.distance <= Observer.NEARBY_RADIUS
-            if in_nearby then
+                local record = {
+                    entity = ent, guid = ent.GUID, prefab = ent.prefab,
+                    x = ex, y = ey, z = ez, distance = math.sqrt(dx * dx + dz * dz),
+                    threat = is_threat(ent), pickable = ent:HasTag("pickable"),
+                }
                 nearby[#nearby + 1] = record
                 if record.threat then threats[#threats + 1] = record end
-            end
-
-            -- [喵喵喵] 地标用更大半径，只输出分类结果供上层策略与记忆使用。
-            if ex ~= nil and ez ~= nil
-                and record.distance ~= nil
-                and record.distance <= Observer.LANDMARK_RADIUS then
                 local categories = {}
                 if classify(ent, categories) then
                     for category in pairs(categories) do
-                        local list = landmarks[category]
-                        if list == nil then
-                            list = {}
-                            landmarks[category] = list
-                        end
-                        if #list < Observer.LANDMARK_LIMIT then
-                            list[#list + 1] = record
-                        end
+                        landmarks[category] = landmarks[category] or {}
+                        landmarks[category][#landmarks[category] + 1] = record
                     end
                 end
             end
         end
     end
-
-    -- [喵喵喵]: 先按距离排序再截断，防止实体枚举顺序挤掉脚下火源和贴身威胁。 (2026-11-11)
-    for _, list in ipairs({ nearby, threats }) do
-        table.sort(list, function(a, b) return a.distance < b.distance end)
-        while #list > Observer.NEARBY_LIMIT do list[#list] = nil end
-    end
+    table.sort(nearby, function(a, b) return a.distance < b.distance end)
+    table.sort(threats, function(a, b) return a.distance < b.distance end)
     return nearby, threats, landmarks
 end
 
 -- [喵喵喵] 海岸：绕玩家八方向探测，命中海洋点即记为海岸点(纯坐标)。
-local function collect_shore(x, z)
+local function collect_shore(player, view, x, z)
     local points = nil
     if TheWorld == nil or TheWorld.Map == nil or TheWorld.Map.IsOceanAtPoint == nil then
         return points
@@ -826,7 +847,7 @@ local function collect_shore(x, z)
         local ocean = try(function()
             return map:IsOceanAtPoint(px, 0, pz)
         end)
-        if ocean then
+        if ocean and point_visible(player, view, px, 0, pz) then
             points = points or {}
             points[#points + 1] = { x = px, z = pz }
         end
@@ -889,7 +910,7 @@ local function memory_cell(value)
 end
 
 -- [喵喵喵] 写一条地标记忆：同网格去重 + 类别上限裁剪(淘汰最旧)。
-local function remember(shard, category, prefab, x, z, cycle)
+local function remember(shard, category, prefab, x, z, cycle, pickable)
     if shard == nil or type(prefab) ~= "string" or x == nil or z == nil then
         return nil, false
     end
@@ -905,13 +926,16 @@ local function remember(shard, category, prefab, x, z, cycle)
 
     for i = 1, #list do
         local entry = list[i]
-        if entry ~= nil and memory_cell(entry.x or 0) == gx and memory_cell(entry.z or 0) == gz then
+        if entry ~= nil and entry.prefab == prefab
+            and memory_cell(entry.x or 0) == gx and memory_cell(entry.z or 0) == gz then
+            local changed = entry.pickable ~= pickable
             entry.prefab = prefab
             entry.x = x
             entry.z = z
             entry.cycle = cycle or entry.cycle
             entry.seq = seq
-            return entry, false
+            entry.pickable = pickable
+            return entry, changed
         end
     end
 
@@ -934,6 +958,7 @@ local function remember(shard, category, prefab, x, z, cycle)
         z = z,
         cycle = cycle,
         seq = seq,
+        pickable = pickable,
     }
     list[#list + 1] = entry
     return entry, true
@@ -955,7 +980,8 @@ local function update_memory(memory, shard, snapshot, landmarks, shore_points)
         for category, list in pairs(landmarks) do
             for i = 1, #list do
                 local record = list[i]
-                local _, is_new = remember(shard, category, record.prefab, record.x, record.z, snapshot.cycles)
+                local _, is_new = remember(shard, category, record.prefab, record.x, record.z,
+                    snapshot.cycles, record.pickable)
                 if is_new then
                     added = added + 1
                 end
@@ -1070,6 +1096,7 @@ function Observer.Observe(player, memory)
         snapshot.time_in_phase = as_number(state.timeinphase)
         snapshot.season = type(state.season) == "string" and state.season or nil
         snapshot.season_progress = clamp01(state.seasonprogress)
+        snapshot.precipitation_rate = as_number(state.precipitationrate)
         snapshot.phase = type(state.phase) == "string" and state.phase or nil
         snapshot.moonphase = type(state.moonphase) == "string" and state.moonphase or nil
         snapshot.nightmare_phase = type(state.nightmarephase) == "string" and state.nightmarephase or nil
@@ -1081,6 +1108,7 @@ function Observer.Observe(player, memory)
     local clock = network ~= nil and network.components ~= nil and network.components.clock or nil
     if clock ~= nil then
         snapshot.time_until_night = as_number(try(function() return clock:GetTimeUntilPhase("night") end))
+        snapshot.time_until_day = as_number(try(function() return clock:GetTimeUntilPhase("day") end))
     end
 
     -- [喵喵喵] 背包/装备/手持/打开的容器。
@@ -1091,12 +1119,14 @@ function Observer.Observe(player, memory)
     snapshot.open_containers = build_open_containers(player, inventory.backpack)
 
     -- [喵喵喵] 附近实体、威胁、地标分类。
-    local nearby, threats, landmarks = collect_nearby(player, x, y, z)
+    snapshot.view = screen_view(x, z)
+    snapshot.terrain = collect_terrain(player, snapshot)
+    local nearby, threats, landmarks = collect_nearby(player, x, y, z, snapshot.view)
     snapshot.nearby = nearby
     snapshot.threats = threats
     snapshot.landmarks = landmarks
 
-    local shore_points = collect_shore(x, z)
+    local shore_points = collect_shore(player, snapshot.view, x, z)
     snapshot.shore_points = shore_points
 
     -- [喵喵喵] 有界记忆写入(每分片每类别上限 + 分片上限)。
@@ -1115,6 +1145,8 @@ function Observer.Observe(player, memory)
         missing = "no_world_state"
     elseif snapshot.cycles == nil then
         missing = "no_cycles"
+    elseif snapshot.view == nil or type(CanEntitySeeTarget) ~= "function" then
+        missing = "view_unavailable"
     end
 
     if missing == nil then

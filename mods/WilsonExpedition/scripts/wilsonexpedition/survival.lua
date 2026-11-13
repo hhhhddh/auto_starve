@@ -1,5 +1,5 @@
 -- WilsonExpedition 四季生存策略
--- [喵喵喵]: 即时安全、照明、温度、身体、装备、季节准备、储备、探索按优先级调度。
+-- [喵喵喵]: 即时安全、照明、温度、身体、基础储备、装备与季节准备、探索按优先级调度。
 -- Plan(player, snapshot, state) -> command|nil, reason
 -- Report(state, command, status, reason) -> ok, detail
 -- Cancel(state) -> ok, detail；Progress(state) -> 纯值诊断摘要。
@@ -52,14 +52,10 @@ Survival.BURN_RADIUS = 2.5
 -- 取不到就用它的默认值 8；BOAT_SEARCH_RADIUS 只收看得见的船。
 Survival.ESCAPE_DISTANCE = num_or(Navigation.RETREAT_DISTANCE, 8)
 Survival.ESCAPE_CLEARANCE = 4
+-- [喵喵喵]: 视线中断不代表追击结束；按原版疯猪最长单次追击时间加余量保留当前撤退联系点，期间不读取隐藏实体。 (2026-11-13)
+local THREAT_CONTACT_GRACE = 10 * math.max(1, TUNING.SPRING_COMBAT_MOD or 1.33) + 2
 Survival.BOAT_SEARCH_RADIUS = num_or(Observer.NEARBY_RADIUS, 20)
 Survival.SAIL_BOARD_RANGE = (type(Sailing.DEFAULT_RANGE) == "table" and num_or(Sailing.DEFAULT_RANGE.board, 1.0)) or 1.0
-
--- [喵喵喵]: 逃命预算：同一类逃命最多连续发起 ESCAPE_MAX_RUNS 次，失败到
--- ESCAPE_MAX_ATTEMPTS 就冷却 ESCAPE_BLOCK_TTL 秒，避免“逃不停/卡在换目标”上。
-Survival.ESCAPE_MAX_RUNS = 6
-Survival.ESCAPE_MAX_ATTEMPTS = 3
-Survival.ESCAPE_BLOCK_TTL = 30
 
 -- [喵喵喵]: 被挂起的 Supplies 命令最长保留秒数；超时就走显式取消（转发回 Supplies）。
 Survival.SUSPEND_TTL = 120
@@ -71,6 +67,7 @@ Survival.PRIORITY_HEAL = ACTIONS_DEFAULT_PRIORITY + 86
 Survival.PRIORITY_STARVE = ACTIONS_DEFAULT_PRIORITY + 84
 Survival.PRIORITY_EAT = ACTIONS_DEFAULT_PRIORITY + 60
 Survival.PRIORITY_EQUIP = ACTIONS_DEFAULT_PRIORITY + 52
+Survival.PRIORITY_STOCK = ACTIONS_DEFAULT_PRIORITY + 36
 Survival.PRIORITY_RESERVE = ACTIONS_DEFAULT_PRIORITY + 20
 Survival.PRIORITY_EXPLORE = ACTIONS_DEFAULT_PRIORITY + 8
 
@@ -198,6 +195,14 @@ Survival.SANITY_LOW = 0.30
 Survival.ARMOR_RADIUS = 6
 Survival.TORCH_RESERVE = 2
 Survival.FOOD_RESERVE = 4
+local FOOD_REFILL_TARGET = 8
+-- [喵喵喵]: 低水位触发后补到一批目标量，避免每消耗一份就重新跑采购；均不超过原版一组。 (2026-11-12)
+local MATERIAL_STOCK = {
+    { item = "cutgrass", low = 8, target = 20 },
+    { item = "twigs", low = 8, target = 20 },
+    { item = "flint", low = 4, target = 8 },
+    { item = "log", low = 6, target = 12 },
+}
 Survival.COOK_RESERVE = 2
 Survival.ARMOR_RESERVE = 1
 
@@ -414,8 +419,6 @@ add_food("carrot_cooked", CAL_SMALL, HEAL_SMALL, 2)
 add_food("berries_juicy", CAL_SMALL, HEAL_TINY, 3)
 add_food("carrot", CAL_SMALL, HEAL_TINY, 3)
 add_food("berries", CAL_TINY, 0, 4)
-add_food("seeds", CAL_TINY / 2, 0, 6)
-add_food("seeds_cooked", CAL_TINY / 2, HEAL_TINY, 5)
 add_food("cave_banana", CAL_SMALL, HEAL_TINY, 3)
 add_food("cave_banana_cooked", CAL_SMALL, HEAL_SMALL, 2)
 add_food("cactus_meat_cooked", CAL_SMALL, HEAL_TINY, 1, tune("SANITY_MED", 15))
@@ -462,11 +465,11 @@ add_armor("armorgrass", "ARMORGRASS_ABSORPTION", 0.6)
 local WEAPONS = { spear = true }
 
 -- [喵喵喵]: 食物储备的请求顺序：都是 Supplies 支持的可再生项，前面的不行就换下一个。
-local FOOD_FALLBACK = { "berries", "carrot", "berries_juicy", "seeds", "cactus_meat_cooked", "cave_banana_cooked", "cookedsmallmeat" }
+local FOOD_FALLBACK = { "berries", "carrot", "berries_juicy", "cactus_meat_cooked", "cave_banana", "cookedsmallmeat" }
 local FOOD_SOURCES = {
     berrybush = "berries", berrybush2 = "berries", carrot_planted = "carrot", berrybush_juicy = "berries_juicy",
-    seeds = "seeds", cactus = "cactus_meat_cooked", oasis_cactus = "cactus_meat_cooked",
-    cave_banana_tree = "cave_banana_cooked", rabbithole = "cookedsmallmeat",
+    cactus = "cactus_meat_cooked", oasis_cactus = "cactus_meat_cooked",
+    cave_banana_tree = "cave_banana", rabbithole = "cookedsmallmeat",
 }
 
 -- [喵喵喵]: 随身持有量（主栏/手持/装备槽/溢出背包）；世界容器里的不算。
@@ -490,13 +493,31 @@ local function count_owned(snapshot, prefab)
     return total
 end
 
-local function food_is_fresh(item)
+local function food_freshness(item)
     local inventoryitem = item ~= nil and item.replica ~= nil and item.replica.inventoryitem or nil
     local classified = inventoryitem ~= nil and inventoryitem.classified or nil
-    if classified == nil or classified.perish == nil then return false end
+    if classified == nil or classified.perish == nil then return nil end
     local ok, remaining = pcall(function() return classified.perish:value() end)
-    -- [喵喵喵]: 原生 perish 用 0..62，63 表示未知；只吃明确新鲜的食物，陈旧与腐坏不能按原营养值算。
-    return ok and is_finite_number(remaining) and remaining <= 62 and remaining > 31
+    -- [喵喵喵]: 原生perish的0..62可读，63表示未知；未知值不能当成新鲜或即将腐坏。 (2026-11-13)
+    return ok and is_finite_number(remaining) and remaining >= 0 and remaining <= 62 and remaining / 62 or nil
+end
+
+local function food_is_fresh(item)
+    local freshness = food_freshness(item)
+    return freshness ~= nil and freshness > tune("PERISH_FRESH", 0.5)
+end
+
+local function edible_food(record)
+    local food, freshness = FOODS[record.prefab], food_freshness(record.entity)
+    if food == nil or food.hunger <= 0 or food.health < 0 or freshness == nil
+        or freshness <= tune("PERISH_STALE", 0.2) then return nil end
+    if freshness <= tune("PERISH_FRESH", 0.5) then
+        -- [喵喵喵]: 陈旧但未腐坏的安全食物仍可吃，使用原版衰减值，不按新鲜营养估计饱食缺口。 (2026-11-13)
+        food = { prefab = food.prefab, rank = food.rank, sanity = 0,
+            hunger = food.hunger * tune("STALE_FOOD_HUNGER", 0.667),
+            health = food.health * tune("STALE_FOOD_HEALTH", 0.333) }
+    end
+    return food, freshness
 end
 
 local function count_food_total(snapshot)
@@ -524,13 +545,12 @@ local function pick_food_record(snapshot, prefer_health)
     if records == nil then
         return nil, nil, "inventory_unreadable"
     end
-    local best, best_score, best_main = nil, nil, nil
+    local best, best_food, best_score, best_main = nil, nil, nil, nil
     for i = 1, #records do
         local record = records[i]
         if type(record) == "table" and is_valid(record.entity) then
-            local entry = FOODS[record.prefab]
-            if entry ~= nil and entry.hunger > 0 and entry.health >= 0
-                and food_is_fresh(record.entity) and Survival.CARRIED_KINDS[record.kind] == true then
+            local entry = edible_food(record)
+            if entry ~= nil and Survival.CARRIED_KINDS[record.kind] == true then
                 local score
                 if prefer_health then
                     score = entry.health * 100 + entry.hunger - entry.rank
@@ -547,7 +567,7 @@ local function pick_food_record(snapshot, prefer_health)
                     better = true
                 end
                 if better then
-                    best, best_score, best_main = record, score, main
+                    best, best_food, best_score, best_main = record, entry, score, main
                 end
             end
         end
@@ -555,7 +575,7 @@ local function pick_food_record(snapshot, prefer_health)
     if best == nil then
         return nil, nil, "no_edible_owned"
     end
-    return best, FOODS[best.prefab], nil
+    return best, best_food, nil
 end
 
 -- [喵喵喵]: 在一个“prefab 名 -> true”的集合里找一件随身物品（不分槽位）。
@@ -933,8 +953,8 @@ local function reset_runtime(rt, world)
     rt.escape_runs = 0
     rt.escape_t = nil
     rt.retreat_guid = nil
+    rt.retreat_contact = nil
     rt.attempts = {}
-    rt.efails = {}
     rt.blocked = {}
     rt.soft = {}
     rt.softn = {}
@@ -944,6 +964,8 @@ local function reset_runtime(rt, world)
     rt.base_note = nil
     rt.season = nil
     rt.thermal = nil
+    rt.refills = nil
+    rt.food_refill = nil
 end
 
 local function ensure_runtime(state, snapshot)
@@ -1029,6 +1051,8 @@ local function bump_attempt(rt, key)
 end
 
 local function mark_blocked(rt, key)
+    -- [喵喵喵]: 危险持续时每轮重算退路；单条 Navigation 路线已有预算，不能因累计命令 ID 让逃生进入采购冷却。 (2026-11-13)
+    if string.sub(key, 1, 7) == "escape:" then return end
     if type(rt.blocked) ~= "table" then
         rt.blocked = {}
     end
@@ -1053,21 +1077,6 @@ local function soft_block(rt, key)
         rt.softn[key] = nil
         mark_blocked(rt, key)
     end
-end
-
--- [喵喵喵]: 逃命某一步是否已被预算挡下：冷却中，或该类逃命已经**失败**到上限。
--- 注意用独立的失败计数（efails），不能用 attempts：attempts 现在“每完成一次也递增”
--- （用于每次新操作拿新 id），拿它当失败预算会把成功的撤退也算成失败。
-local function escape_unavailable(rt, key)
-    if is_blocked(rt, key) then
-        return true, "cooldown"
-    end
-    local fails = type(rt.efails) == "table" and num_or(rt.efails[key], 0) or 0
-    if fails >= Survival.ESCAPE_MAX_ATTEMPTS then
-        -- [喵喵喵]: 冷却已结束就重开失败预算，不能让旧失败永久关闭逃生。 (2026-11-11)
-        rt.efails[key] = 0
-    end
-    return false, nil
 end
 
 -- [喵喵喵]: 命令 id 含世界键 + 逻辑步 + 真实重试计数：
@@ -1217,8 +1226,11 @@ end
 --------------------------------------------------------------------------
 
 local function supplies_request_decision(rt, player, snapshot, state, key, purpose, priority, item, count)
+    local request = { item = item, count = count }
+    rt.demands[#rt.demands + 1] = request
     return {
         key = key,
+        request = request,
         priority = priority,
         purpose = purpose,
         origin = "supplies",
@@ -1286,6 +1298,54 @@ end
 
 local navigation_decision
 
+local function prepare_torch_decision(player, snapshot, state, rt)
+    local until_night = snapshot.time_until_night
+    if snapshot.shard_kind ~= "surface" or not is_finite_number(until_night) then return nil end
+    local until_day = snapshot.time_until_day
+    if snapshot.phase == "day" and is_finite_number(snapshot.time) then
+        until_day = tune("TOTAL_DAY_TIME", 480) * (1 - snapshot.time)
+    end
+    if not is_finite_number(until_day) or until_day < until_night then return nil end
+    local records = carried_records(snapshot)
+    if records == nil then return nil end
+    local owned, fuel = 0, 0
+    local full = tune("TORCH_FUEL", 75)
+        / (1 + tune("TORCH_RAIN_RATE", 1.5) * num_or(snapshot.precipitation_rate, 0))
+    for _, record in ipairs(records) do
+        if Survival.CARRIED_KINDS[record.kind] and is_valid(record.entity) then
+            if record.prefab == "torch" then
+                local replica = record.entity.replica and record.entity.replica.inventoryitem
+                local classified = replica and replica.classified
+                local ok, percent = pcall(function() return classified.percentused:value() end)
+                if not ok or not is_finite_number(percent) or percent < 0 or percent > 100 then return nil end
+                owned = owned + record.count
+                fuel = fuel + math.max(0, percent - 1) / 100 * full * record.count
+            elseif (Survival.HAND_LIGHT[record.prefab] or Survival.HEAD_LIGHT[record.prefab])
+                and not record.entity:HasTag("fueldepleted") then
+                return nil
+            end
+        end
+    end
+    -- [喵喵喵]: 没有可用照明时先备过夜材料，不能让整批普通储备吃掉第一天；已有燃料则沿用临夜补给窗口。 (2026-11-12)
+    if fuel > 0 and snapshot.phase ~= "night" and until_night > num_or(Supplies.PLAN_TIMEOUT, 180) then
+        return nil
+    end
+    -- [喵喵喵]: 两把残火把不等于一夜照明；按剩余燃料、原版昼夜长度和雨耗提前补齐，不能等全灭。 (2026-11-12)
+    local needed = until_day - until_night + Survival.LIGHT_EQUIP_LEAD - fuel
+    local key = "light:reserve_fuel"
+    if needed <= 0 or is_blocked(rt, key) then return nil end
+    -- [喵喵喵]: 预备照明不延误已经拿到手的救命食物；吃完这口后仍可抢占漫长采购。 (2026-11-12)
+    if is_finite_number(snapshot.hunger) and snapshot.hunger <= Survival.HUNGER_STARVE
+        and pick_food_record(snapshot, false) ~= nil then return nil end
+    local priority = Survival.PRIORITY_STARVE - 1
+    -- [喵喵喵]: 即将入夜或正在过夜时仍先保照明；白天的燃料储备低于正在发生的饥荒。 (2026-11-12)
+    if snapshot.phase == "night" or until_night <= Survival.LIGHT_EQUIP_LEAD then
+        priority = Survival.PRIORITY_LIGHT
+    end
+    return supplies_request_decision(rt, player, snapshot, state, key, key,
+        priority, "torch", owned + math.ceil(needed / full))
+end
+
 local function choose_light(player, snapshot, state, rt)
     local phase = read_phase(snapshot)
     local light_state, light_why = read_light(snapshot)
@@ -1319,7 +1379,9 @@ local function choose_light(player, snapshot, state, rt)
         need_light = true
     end
 
+    local fuel_reserve = prepare_torch_decision(player, snapshot, state, rt)
     if not need_light then
+        if fuel_reserve ~= nil then return fuel_reserve, nil end
         if light_state == "lit" then
             return nil, string.format("light_ok:phase=%s|%s", tostring(phase), light_brief(snapshot))
         end
@@ -1334,8 +1396,9 @@ local function choose_light(player, snapshot, state, rt)
         tag = "prepare"
     end
 
-    -- 1) 已经戴着真实光源：不需要动作（真的烧完了，下一次观测就是 dark 且物品已消失）。
+    -- 1) 已装备照明时继续补齐本夜燃料，库存足够则无需动作。
     if equipped_prefab ~= nil then
+        if fuel_reserve ~= nil then return fuel_reserve, nil end
         return nil, string.format("light_ok:equipped=%s@%s|phase=%s|trigger=%s",
             tostring(equipped_prefab), tostring(equipped_slot), tostring(phase), tag)
     end
@@ -1547,6 +1610,34 @@ local function addfuel_decision(rt, firepit, fuel)
     }
 end
 
+local function wait_for_escape(why)
+    -- [喵喵喵]: 没有已确认退路仍处于危险中，先撤普通采购并持续重评，不恢复原路线。 (2026-11-12)
+    return {
+        key = "escape:wait", purpose = "escape:wait", origin = "survival",
+        priority = Survival.PRIORITY_ESCAPE,
+        plan = function() return nil, "escape:wait: " .. tostring(why) end,
+    }
+end
+
+local function retreat_armor(snapshot, rt)
+    local _, head, body = equip_slots()
+    for _, slot in ipairs({ head, body }) do
+        local current = equipment_prefab(snapshot, slot)
+        if current == nil or (slot == body and current == "backpack") then
+            local record = pick_armor_record(snapshot, slot)
+            -- [喵喵喵]: 逃生不换减速大理石甲；替换背包只用主栏护甲，让原版换装腾出的槽位接住背包。 (2026-11-13)
+            if record ~= nil and record.prefab ~= "armormarble"
+                and (current == nil or record.kind == "inventory") then
+                local key = "vital:equip:armor:" .. tostring(record.guid)
+                if not is_blocked(rt, key) then
+                    return inventory_action_decision(rt, key, "vital:equip:armor:" .. record.prefab,
+                        Survival.PRIORITY_ESCAPE - 1, "EQUIP", record.entity)
+                end
+            end
+        end
+    end
+end
+
 local function choose_escape(player, snapshot, state, rt)
     local px, pz = snapshot.x, snapshot.z
     local notes = {}
@@ -1555,10 +1646,6 @@ local function choose_escape(player, snapshot, state, rt)
     local on_fire, fire_why = read_on_fire(player, snapshot)
     if on_fire == true then
         local key = "escape:fire"
-        local blocked, bwhy = escape_unavailable(rt, key)
-        if blocked then
-            return nil, string.format("escape_blocked:%s|%s", key, tostring(bwhy))
-        end
         if snapshot.platform ~= nil then
             return nil, "escape_on_platform:fire|platform=" .. tostring(snapshot.platform.prefab)
         end
@@ -1584,10 +1671,6 @@ local function choose_escape(player, snapshot, state, rt)
         local ocean, owhy = map_is_ocean(px, pz)
         if ocean == true then
             local key = "escape:drown"
-            local blocked, bwhy = escape_unavailable(rt, key)
-            if blocked then
-                return nil, string.format("escape_blocked:%s|%s", key, tostring(bwhy))
-            end
             local boat, bwhy = visible_boat(snapshot, px, pz)
             if boat == nil then
                 return nil, "drowning:no_visible_boat|" .. tostring(bwhy)
@@ -1600,35 +1683,68 @@ local function choose_escape(player, snapshot, state, rt)
 
     -- 3) 可见威胁：索敌区外提前避让，正在撤退的目标须额外拉开距离。
     local nearest, twhy = nearest_threat(snapshot)
+    local threats = snapshot.threats or {}
+    local contact = rt.retreat_contact
+    if contact ~= nil then
+        -- [喵喵喵]: 重见同一实体时完全使用新观测，包含变回中立猪；旧坐标只在短暂失去视线时指导继续撤离。 (2026-11-13)
+        for _, record in ipairs(snapshot.nearby or {}) do
+            if record.guid == contact.guid then contact = nil; break end
+        end
+        for _, record in ipairs(threats) do
+            if contact ~= nil and record.guid == contact.guid then contact = nil; break end
+        end
+        if contact ~= nil and now() - contact.t > THREAT_CONTACT_GRACE then contact = nil end
+        if contact ~= nil then
+            threats = {}
+            for _, record in ipairs(snapshot.threats or {}) do threats[#threats + 1] = record end
+            threats[#threats + 1] = contact
+        end
+    end
     local danger = nil
-    for _, record in ipairs(snapshot.threats or {}) do
+    for _, record in ipairs(threats) do
         if is_finite_number(record.x) and is_finite_number(record.z) then
             local distance = math.sqrt((px - record.x) ^ 2 + (pz - record.z) ^ 2)
-            local radius = type(Navigation.THREAT_RADII) == "table" and Navigation.THREAT_RADII[record.prefab] or nil
+            local radius = record == contact and contact.radius
+                or (type(Navigation.THREAT_RADII) == "table" and Navigation.THREAT_RADII[record.prefab] or nil)
             radius = num_or(radius, Survival.ARMOR_RADIUS)
             if record_is_epic(record) == true then radius = math.max(radius, Survival.BOSS_RADIUS) end
+            local base_radius = radius
             -- [喵喵喵]: 到达一个撤退点不代表脱离追击；使用不同的进入/退出距离。 (2026-11-12)
             if rt.retreat_guid ~= nil and rt.retreat_guid == record.guid then
                 radius = radius + Survival.ESCAPE_CLEARANCE
             end
-            if distance <= radius and (danger == nil or distance < danger.distance) then
-                danger = { record = record, distance = distance }
+            if (record == contact or distance <= radius) and (danger == nil or distance < danger.distance) then
+                danger = { record = record, distance = distance, radius = base_radius }
             end
         end
     end
     rt.retreat_guid = danger ~= nil and danger.record.guid or nil
+    rt.retreat_contact = nil
     if danger ~= nil then
+        local record = danger.record
+        rt.retreat_contact = record == contact and contact or {
+            guid = record.guid, prefab = record.prefab, x = record.x, z = record.z,
+            radius = danger.radius, t = now(),
+        }
         local key = "escape:threat"
-        local blocked, bwhy = escape_unavailable(rt, key)
-        if blocked then
-            return nil, string.format("escape_blocked:%s|%s", key, tostring(bwhy))
-        end
         if snapshot.platform ~= nil then
-            return nil, "escape_on_platform:threat|platform=" .. tostring(snapshot.platform.prefab)
+            return wait_for_escape("on_platform"), "escape_on_platform:threat|platform=" .. tostring(snapshot.platform.prefab)
         end
-        local goal, why = Navigation.Retreat(player, snapshot, state, Survival.ESCAPE_DISTANCE)
+        -- [喵喵喵]: 尚有间距时先穿已有护甲；贴脸或正在撤退不为换装停步，敌人逼近可按更高优先级打断换装。 (2026-11-13)
+        if nearest ~= nil and nearest.distance > Survival.IMMINENT_RADIUS
+            and (rt.active == nil or rt.active.priority < Survival.PRIORITY_ESCAPE) then
+            local armor = retreat_armor(snapshot, rt)
+            if armor ~= nil then return armor, nil end
+        end
+        local retreat_snapshot = { x = px, z = pz, threats = threats }
+        -- [喵喵喵]: 固定短点会在追击中反复到达停步；优先走完警戒半径及退出余量，受阻时仍由Retreat缩短并校验整段。 (2026-11-13)
+        local distance = math.max(Survival.ESCAPE_DISTANCE, danger.radius + Survival.ESCAPE_CLEARANCE + Navigation.GOAL_RANGE)
+        local goal, why = Navigation.Retreat(player, retreat_snapshot, state, distance)
+        if goal == nil and distance > Survival.ESCAPE_DISTANCE then
+            goal, why = Navigation.Retreat(player, retreat_snapshot, state, Survival.ESCAPE_DISTANCE)
+        end
         if goal == nil then
-            return nil, string.format("escape_threat:no_safe_point|%s|d=%.1f", tostring(why), danger.distance)
+            return wait_for_escape(why), string.format("escape_threat:no_safe_point|%s|d=%.1f", tostring(why), danger.distance)
         end
         return navigation_escape_decision(rt, key, "escape:threat", goal), nil
     end
@@ -1639,17 +1755,13 @@ local function choose_escape(player, snapshot, state, rt)
         if hounds ~= nil and hounds >= Survival.HOUND_PACK_MIN
             and nearest.distance <= Survival.HOUND_RADIUS then
             local key = "escape:hounds"
-            local blocked, bwhy = escape_unavailable(rt, key)
-            if blocked then
-                return nil, string.format("escape_blocked:%s|%s", key, tostring(bwhy))
-            end
             if snapshot.platform ~= nil then
-                return nil, string.format("escape_on_platform:hounds|platform=%s|n=%d",
+                return wait_for_escape("on_platform"), string.format("escape_on_platform:hounds|platform=%s|n=%d",
                     tostring(snapshot.platform.prefab), hounds)
             end
             local goal, why = Navigation.Retreat(player, snapshot, state, Survival.ESCAPE_DISTANCE)
             if goal == nil then
-                return nil, string.format("escape_hounds:no_safe_point|%s|n=%d|d=%.1f",
+                return wait_for_escape(why), string.format("escape_hounds:no_safe_point|%s|n=%d|d=%.1f",
                     tostring(why), hounds, nearest.distance)
             end
             return navigation_escape_decision(rt, key, "escape:hounds", goal), nil
@@ -1832,31 +1944,75 @@ end
 
 local function cooking_has_benefit(snapshot, pair)
     local raw, cooked = FOODS[pair.raw], FOODS[pair.product]
-    if raw == nil or cooked == nil then return false end
+    if cooked == nil then return false end
+    if raw == nil then return true end
     return raw.health < 0
         or (is_finite_number(snapshot.hunger) and snapshot.hunger <= Survival.HUNGER_EAT and cooked.hunger > raw.hunger)
         or (is_finite_number(snapshot.health) and snapshot.health < 1 and cooked.health > raw.health)
 end
 
 local function food_request_order(snapshot)
-    local order, seen = {}, {}
+    local order, seen, inputs = {}, {}, {}
+    for _, pair in ipairs(RAW_TO_COOKED) do inputs[pair.product] = pair.raw end
+    local starving = is_finite_number(snapshot.hunger) and snapshot.hunger <= Survival.HUNGER_STARVE
+    local fire = cooking_fire_available(snapshot)
     local function add(item)
+        -- [喵喵喵]: 地表不为洞穴专属食材盲目探索；已持有食材仍由进食/加工路径处理。 (2026-11-12)
+        if snapshot.shard_kind == "surface" and item == "cave_banana" then return end
+        -- [喵喵喵]: 熟食补给只加工已有食材；饥荒时还须有现成炊火，避免为一餐递归造甲或找柴。 (2026-11-12)
+        local raw = item ~= nil and inputs[item] or nil
+        if raw ~= nil and ((count_owned(snapshot, raw) or 0) < 1 or (starving and not fire)) then return end
         if item ~= nil and not seen[item] then order[#order + 1], seen[item] = item, true end
     end
     for _, pair in ipairs(RAW_TO_COOKED) do
         if (count_owned(snapshot, pair.raw) or 0) > 0 and cooking_has_benefit(snapshot, pair)
-            and (FOODS[pair.raw].health < 0 or cooking_fire_available(snapshot)) then
+            and (FOODS[pair.raw] == nil or FOODS[pair.raw].health < 0 or fire) then
             add(pair.product)
         end
     end
     for _, record in ipairs(snapshot.nearby or {}) do
         if is_valid(record.entity) and not record.threat then
             local item = FOOD_SOURCES[record.prefab]
-            if record.entity:HasTag("pickable") or record.prefab == "rabbithole" or record.prefab == "seeds" then add(item) end
+            if record.entity:HasTag("pickable") or record.prefab == "rabbithole" then add(item) end
         end
     end
     for _, item in ipairs(FOOD_FALLBACK) do add(item) end
     return order
+end
+
+local function safe_meal(snapshot, player, rt)
+    if type(snapshot.threats) ~= "table" or nearest_threat(snapshot) ~= nil
+        or read_light(snapshot) ~= "lit" or (rt.active ~= nil and rt.active.via == "actions") then return nil end
+    local hunger = player.replica ~= nil and player.replica.hunger or nil
+    if hunger == nil or type(hunger.Max) ~= "function" or type(hunger.GetCurrent) ~= "function" then return nil end
+    local maximum, current = hunger:Max(), hunger:GetCurrent()
+    if not is_finite_number(maximum) or not is_finite_number(current) or maximum <= current then return nil end
+    local command = rt.active ~= nil and rt.active.command or nil
+    local goal = command ~= nil and command.goal or nil
+    local cooking_nearby = goal ~= nil and is_finite_number(goal.x) and is_finite_number(goal.z)
+        and (goal.x - snapshot.x)^2 + (goal.z - snapshot.z)^2 <= num_or(Supplies.PLACED_RADIUS, 12)^2
+        and cooking_fire_available(snapshot)
+    local best, best_freshness, best_hunger
+    for _, record in ipairs(carried_records(snapshot) or {}) do
+        if Survival.CARRIED_KINDS[record.kind] and is_valid(record.entity) then
+            local food, freshness = edible_food(record)
+            local cooking = false
+            if cooking_nearby then
+                for _, pair in ipairs(RAW_TO_COOKED) do
+                    if pair.raw == record.prefab and command.purpose == "approach_fire:" .. pair.product then
+                        cooking = true
+                        break
+                    end
+                end
+            end
+            if food ~= nil and not cooking and food.hunger <= maximum - current
+                and (best == nil or freshness < best_freshness
+                    or (freshness == best_freshness and food.hunger > best_hunger)) then
+                best, best_freshness, best_hunger = record, freshness, food.hunger
+            end
+        end
+    end
+    return best
 end
 
 local function choose_vitals(player, snapshot, state, rt)
@@ -1938,6 +2094,15 @@ local function choose_vitals(player, snapshot, state, rt)
         notes[#notes + 1] = string.format("sanity_low:%.2f", sanity)
     end
 
+    -- [喵喵喵]: 安全时先吃更易变质且能完整吸收的口粮；仅在移动或空闲时插入，不打断正在采集/加工的动作。 (2026-11-13)
+    if hunger_priority == nil and is_finite_number(hunger) and hunger < 1 then
+        local meal = safe_meal(snapshot, player, rt)
+        if meal ~= nil then
+            return inventory_action_decision(rt, "vital:eat:" .. tostring(meal.guid),
+                "vital:eat:" .. meal.prefab .. "|safe", Survival.PRIORITY_EAT, "EAT", meal.entity), nil
+        end
+    end
+
     -- 4) 装备：只有威胁真的在近处才换（否则为了囤货去动装备只会添乱）。
     local nearest = nearest_threat(snapshot)
     if nearest ~= nil and nearest.distance <= Survival.ARMOR_RADIUS then
@@ -1980,12 +2145,71 @@ local function choose_vitals(player, snapshot, state, rt)
 end
 
 --------------------------------------------------------------------------
--- [喵喵喵] 决策片五：储量（最低优先，只为“明天还能活”而做）。
---   每项都变成已有 Supplies 能力范围内的真实请求（火把/食物/烧煮/草甲），
---   不支持的东西（季节装备、需要猪皮/蛛丝等缺料配方）一律不在此处请求。
+-- [喵喵喵] 基础补给先于普通装备/科技推进；紧急生存及御寒装备仍可抢占。
+--------------------------------------------------------------------------
+
+local function choose_stock(player, snapshot, state, rt)
+    local food_total = count_food_total(snapshot)
+    if food_total == nil then return nil, "reserve:inventory_unreadable" end
+    if food_total < Survival.FOOD_RESERVE then
+        rt.food_refill = true
+    elseif food_total >= FOOD_REFILL_TARGET then
+        rt.food_refill = nil
+    end
+    local food_decision = nil
+    local food_t = now()
+    if rt.food_seen ~= nil and food_total > rt.food_seen then
+        rt.food_search_t0, rt.food_pause_until = nil, nil
+    end
+    rt.food_seen = food_total
+    if rt.food_refill and (rt.food_pause_until == nil or food_t >= rt.food_pause_until) then
+        rt.food_search_t0 = rt.food_search_t0 or food_t
+        if food_t - rt.food_search_t0 >= 60 then
+            -- [喵喵喵]: 普通储粮跨来源共享60秒无收获预算，再让建设/材料推进60秒；实际饥荒走choose_vitals不受限。 (2026-11-12)
+            rt.food_pause_until, rt.food_search_t0 = food_t + 60, nil
+            if type(rt.active) == "table" and string.sub(rt.active.key or "", 1, 13) == "reserve:food:" then
+                release_active(state, rt, "food_search_budget")
+            end
+        else
+            for _, item in ipairs(food_request_order(snapshot)) do
+                local food = FOODS[item]
+                local key = "reserve:food:" .. item
+                if food ~= nil and food.hunger > 0 and not is_blocked(rt, key) then
+                    -- [喵喵喵]: 未来口粮低于设施和材料；当前饥饿由choose_vitals抢占，热量换算保持按实际缺口。 (2026-11-12)
+                    local missing = math.ceil((FOOD_REFILL_TARGET - food_total) * CAL_SMALL / food.hunger)
+                    local decision = supplies_request_decision(rt, player, snapshot, state, key,
+                        key, Survival.PRIORITY_RESERVE - 1, item, (count_owned(snapshot, item) or 0) + missing)
+                    food_decision = food_decision or decision
+                end
+            end
+        end
+    end
+
+    -- [喵喵喵]: 各材料独立保持补货批次；采另一种缺料不会忘记原批次。只登记实际缺口，不额外规划未来配方。 (2026-11-12)
+    rt.refills = rt.refills or {}
+    local preferred
+    for _, stock in ipairs(MATERIAL_STOCK) do
+        local count = count_owned(snapshot, stock.item)
+        local key = "reserve:material:" .. stock.item
+        if count ~= nil then
+            if count >= stock.target then rt.refills[stock.item] = nil
+            elseif count < stock.low then rt.refills[stock.item] = true end
+            if rt.refills[stock.item] and not is_blocked(rt, key) then
+                local decision = supplies_request_decision(rt, player, snapshot, state, key,
+                    key, Survival.PRIORITY_STOCK, stock.item, stock.target)
+                preferred = preferred or decision
+            end
+        end
+    end
+    return preferred or food_decision, nil
+end
+
+--------------------------------------------------------------------------
+-- [喵喵喵] 低优先储备：补充装备和加工已有食材。
 --------------------------------------------------------------------------
 
 local function choose_reserves(player, snapshot, state, rt)
+    local preferred
     -- 1) 便携照明备量（火把：原生 TECH.NONE，可再制）。
     local torch = count_owned(snapshot, "torch")
     if torch == nil then
@@ -1994,8 +2218,8 @@ local function choose_reserves(player, snapshot, state, rt)
     if torch < Survival.TORCH_RESERVE then
         local key = "reserve:torch"
         if not is_blocked(rt, key) then
-            return supplies_request_decision(rt, player, snapshot, state, key, "reserve:torch",
-                Survival.PRIORITY_RESERVE, "torch", Survival.TORCH_RESERVE), nil
+            preferred = supplies_request_decision(rt, player, snapshot, state, key, "reserve:torch",
+                Survival.PRIORITY_RESERVE, "torch", Survival.TORCH_RESERVE)
         end
     end
 
@@ -2007,24 +2231,9 @@ local function choose_reserves(player, snapshot, state, rt)
             local key = "reserve:cook:" .. pair.product
             if raw > 0 and cooked < Survival.COOK_RESERVE and cooking_has_benefit(snapshot, pair)
                 and not is_blocked(rt, key) then
-                return supplies_request_decision(rt, player, snapshot, state, key,
-                    key, Survival.PRIORITY_RESERVE, pair.product, cooked + 1), nil
-            end
-        end
-    end
-
-    -- 3) 食物储量（生的也算，能吃就行）。
-    local food_total = count_food_total(snapshot)
-    if food_total == nil then
-        return nil, "reserve:inventory_unreadable"
-    end
-    if food_total < Survival.FOOD_RESERVE then
-        for _, item in ipairs(food_request_order(snapshot)) do
-            local key = "reserve:food:" .. tostring(item)
-            if not is_blocked(rt, key) then
-                return supplies_request_decision(rt, player, snapshot, state, key,
-                    "reserve:food:" .. tostring(item), Survival.PRIORITY_RESERVE, item,
-                    math.max(Survival.FOOD_RESERVE, (count_owned(snapshot, item) or 0) + 1)), nil
+                local decision = supplies_request_decision(rt, player, snapshot, state, key,
+                    key, Survival.PRIORITY_RESERVE, pair.product, cooked + 1)
+                return preferred or decision, nil
             end
         end
     end
@@ -2057,8 +2266,9 @@ local function choose_reserves(player, snapshot, state, rt)
         end
         local key = "reserve:backpack"
         if not is_blocked(rt, key) then
-            return supplies_request_decision(rt, player, snapshot, state, key,
-                key, Survival.PRIORITY_RESERVE, "backpack", 1), nil
+            local decision = supplies_request_decision(rt, player, snapshot, state, key,
+                key, Survival.PRIORITY_RESERVE, "backpack", 1)
+            return preferred or decision, nil
         end
     end
     local _, _, body = equip_slots()
@@ -2068,27 +2278,20 @@ local function choose_reserves(player, snapshot, state, rt)
             Survival.PRIORITY_RESERVE, "EQUIP", pack.entity), nil end
     end
 
-    for _, material in ipairs({ { "cutgrass", 8 }, { "twigs", 8 }, { "flint", 4 }, { "log", 6 } }) do
-        local key = "reserve:material:" .. material[1]
-        if (count_owned(snapshot, material[1]) or 0) < material[2] and not is_blocked(rt, key) then
-            return supplies_request_decision(rt, player, snapshot, state, key, key,
-                Survival.PRIORITY_RESERVE, material[1], material[2]), nil
-        end
-    end
-
     -- 4) 护甲储量：草甲（原生 TECH.NONE）优先；已经有木甲/大理石甲就不再多造。
     local grass = count_owned(snapshot, "armorgrass") or 0
     local wood = count_owned(snapshot, "armorwood") or 0
     if (grass + wood) < Survival.ARMOR_RESERVE then
         local key = "reserve:armor:armorgrass"
         if not is_blocked(rt, key) then
-            return supplies_request_decision(rt, player, snapshot, state, key,
+            local decision = supplies_request_decision(rt, player, snapshot, state, key,
                 "reserve:armor:armorgrass", Survival.PRIORITY_RESERVE, "armorgrass",
-                Survival.ARMOR_RESERVE), nil
+                Survival.ARMOR_RESERVE)
+            return preferred or decision, nil
         end
     end
 
-    return nil, nil
+    return preferred, nil
 end
 
 --------------------------------------------------------------------------
@@ -2309,25 +2512,29 @@ local function base_return_decision(rt, snapshot, state)
 end
 
 local function explore_decision(rt, player, snapshot, state)
+    local starving = is_finite_number(snapshot.hunger) and snapshot.hunger <= Survival.HUNGER_STARVE
+    local priority = starving and Survival.PRIORITY_STARVE or Survival.PRIORITY_EXPLORE
+    local purpose = starving and "vital:search:food" or "explore"
     return {
-        key = "explore",
-        priority = Survival.PRIORITY_EXPLORE,
-        purpose = "explore",
+        key = purpose,
+        priority = priority,
+        purpose = purpose,
         origin = "exploration",
         plan = function()
             local goal, why = Exploration.Next(player, snapshot, state)
             if type(goal) ~= "table" then
-                return nil, "explore:<" .. tostring(why) .. ">"
+                return nil, purpose .. ":<" .. tostring(why) .. ">"
             end
-            local id = goal.id ~= nil and tostring(goal.id) or command_id(rt, "explore")
+            local id = goal.id ~= nil and tostring(goal.id) or command_id(rt, purpose)
+            if starving then goal.priority = priority end
             return {
                 via = "navigation",
                 goal = goal,
                 id = id,
-                purpose = "explore:" .. tostring(goal.kind),
+                purpose = purpose .. ":" .. tostring(goal.kind),
                 owner = Survival.OWNER,
-                stage = "explore",
-                priority = Survival.PRIORITY_EXPLORE,
+                stage = purpose,
+                priority = priority,
                 explore_goal = goal,
             }, nil
         end,
@@ -2482,6 +2689,7 @@ function Survival.Plan(player, snapshot, state)
 
     rt.day = snapshot.day
     rt.season = read_season(snapshot)
+    rt.demands = {}
 
     -- [喵喵喵]: 已经下过 challenge_failed 结论就一直保持一致，不再产生任何命令。
     if type(rt.failed) == "table" then
@@ -2520,9 +2728,18 @@ function Survival.Plan(player, snapshot, state)
 
     -- [喵喵喵]: 次序：逃命 > 照明 > 环境(冷/热/湿) > 身体(治疗/进食/装备) > 储量 > 探索。
     local escape, escape_reason = choose_escape(player, snapshot, state, rt)
+    if type(escape) == "table" and escape.key == "escape:wait"
+        and (read_phase(snapshot) == "night" or read_light(snapshot) == "dark") then
+        -- [喵喵喵]: 退路未确认时仍可原地装备现成光源，但不以点灯为由重开采购或远行。 (2026-11-12)
+        local immediate = choose_light(player, snapshot, state, rt)
+        if type(immediate) == "table" and string.sub(immediate.key or "", 1, 12) == "light:equip:" then
+            escape = immediate
+        end
+    end
     local light, light_reason = nil, nil
     local env, env_reason = nil, nil
     local vitals, vitals_reason = nil, nil
+    local stock, stock_reason = nil, nil
     local gear, gear_reason = nil, nil
     local season, season_reason = nil, nil
     if type(escape) ~= "table" then
@@ -2534,7 +2751,8 @@ function Survival.Plan(player, snapshot, state)
                 vitals = immediate
             end
         end
-        if type(light) ~= "table" and vitals == nil then
+        if (type(light) ~= "table" or (light.key == "light:reserve_fuel"
+            and light.priority < Survival.PRIORITY_LIGHT)) and vitals == nil then
             env, env_reason = choose_environment(player, snapshot, state, rt)
             if type(env) == "table" and env.key == "env:hold" then
                 -- [喵喵喵]: 温度恢复期间允许原地进食、治疗和换装；不让采购/探索把角色拉离冷热源。
@@ -2546,10 +2764,21 @@ function Survival.Plan(player, snapshot, state)
             end
             if type(env) ~= "table" and vitals == nil then
                 vitals, vitals_reason = choose_vitals(player, snapshot, state, rt)
-                if type(vitals) ~= "table" then
+                if is_finite_number(snapshot.hunger) and snapshot.hunger <= Survival.HUNGER_STARVE
+                    and (type(vitals) ~= "table" or vitals.priority < Survival.PRIORITY_STARVE) then
+                    -- [喵喵喵]: 食物请求冷却不代表饥荒解除；继续安全找食，不能回退补草、装备或建设。 (2026-11-12)
+                    vitals = explore_decision(rt, player, snapshot, state)
+                end
+                if type(vitals) ~= "table" or (vitals.origin == "supplies" and vitals.priority < Survival.PRIORITY_STARVE) then
+                    stock, stock_reason = choose_stock(player, snapshot, state, rt)
                     gear, gear_reason = choose_season_gear(player, snapshot, state, rt)
+                    local reserves, reserves_reason = choose_reserves(player, snapshot, state, rt)
+                    if type(gear) ~= "table" or (type(reserves) == "table" and reserves.priority > gear.priority) then
+                        gear, gear_reason = reserves, reserves_reason
+                    end
                     local food = count_food_total(snapshot)
-                    if type(gear) ~= "table" and food ~= nil and food >= Survival.FOOD_RESERVE
+                    local fed = is_finite_number(snapshot.hunger) and snapshot.hunger >= 0.6
+                    if food ~= nil and (food >= Survival.FOOD_RESERVE or fed)
                         and (count_owned(snapshot, "torch") or 0) >= 1
                         and (count_owned(snapshot, "cutgrass") or 0) >= 4
                         and (count_owned(snapshot, "twigs") or 0) >= 2 then
@@ -2559,22 +2788,15 @@ function Survival.Plan(player, snapshot, state)
             end
         end
     end
-    -- [喵喵喵]: 完全没有任何危险观测时才清零逃命预算；只要还有“读不到/未知”
-    -- 就不清零，避免“逃 6 次→空转一帧→又逃 6 次”的伪稳定。
+    -- [喵喵喵]: 危险解除时清理本次遭遇的撤退计数与命令身份。
     if type(escape) ~= "table" and escape_reason == nil then
         rt.escape_runs = 0
-        -- [喵喵喵]: 真正安全时把逃命步的失败计数/冷却也清掉，下一次危险还能重新尝试。
+        -- [喵喵喵]: 仅在确认安全后重置身份，持续撤退中的终态仍须由新 ID 区分。
         if type(rt.attempts) == "table" then
             rt.attempts["escape:fire"] = nil
             rt.attempts["escape:threat"] = nil
             rt.attempts["escape:drown"] = nil
             rt.attempts["escape:hounds"] = nil
-        end
-        if type(rt.efails) == "table" then
-            rt.efails["escape:fire"] = nil
-            rt.efails["escape:threat"] = nil
-            rt.efails["escape:drown"] = nil
-            rt.efails["escape:hounds"] = nil
         end
         if type(rt.blocked) == "table" then
             rt.blocked["escape:fire"] = nil
@@ -2584,19 +2806,69 @@ function Survival.Plan(player, snapshot, state)
         end
     end
 
+    local candidates = { escape, light, env, vitals, stock, gear, season }
+    local primary
+    for i = 1, 7 do
+        local candidate = candidates[i]
+        if type(candidate) == "table" and (primary == nil or candidate.priority > primary.priority) then
+            primary = candidate
+        end
+    end
+    local nearby, nearby_better
+    -- [喵喵喵]: 只有非危急采购参与就近合并；实际进食/换装、临夜备灯和避险保持原有抢占。 (2026-11-12)
+    if (primary == nil or (primary.origin == "supplies" and primary.priority < Survival.PRIORITY_STARVE))
+        and (light == nil or (is_finite_number(snapshot.time_until_night)
+            and snapshot.time_until_night > Supplies.PLAN_TIMEOUT))
+        and (rt.active == nil or (rt.active.via == "navigation"
+            and (rt.active.owner == SUPPLIES_OWNER or rt.active.key == "explore")
+            and rt.active.priority < Survival.PRIORITY_STARVE)) then
+        local request = Supplies.NearbyRequest(player, snapshot, state, rt.demands, primary and primary.request)
+        local key = request and ("nearby:" .. request.item .. ":" .. tostring(request.guid))
+        if key ~= nil and not is_blocked(rt, key) then
+            nearby_better = rt.active == nil
+            if rt.active ~= nil then
+                local goal = rt.active.command and rt.active.command.goal
+                if goal ~= nil and is_finite_number(goal.x) and is_finite_number(goal.z) then
+                    local distance = math.sqrt((goal.x - snapshot.x)^2 + (goal.z - snapshot.z)^2)
+                    nearby_better = request.distance + Navigation.GOAL_RANGE < distance
+                end
+            end
+            if nearby_better then
+                local priority = math.max(primary and primary.priority or Survival.PRIORITY_EXPLORE,
+                    rt.active and rt.active.priority or Survival.PRIORITY_EXPLORE)
+                nearby = supplies_request_decision(rt, player, snapshot, state,
+                    key, "acquire:" .. request.item, priority, request.item, request.count)
+                candidates[8] = nearby
+            end
+        end
+    end
     if type(rt.active) == "table" then
-        -- [喵喵喵]: 只有“更高优先级的另一件事”才能顶替在飞命令；顶替 = 挂起，
-        -- 不抹掉 Supplies 的记账（见 suspend_active 的注释）。
+        -- [喵喵喵]: 同一采购随饥饿恶化升级优先级，不重发动作，也不能再被未来的备灯采购抢占。 (2026-11-12)
+        for i = 1, 8 do
+            local decision = candidates[i]
+            if type(decision) == "table" and decision.key == rt.active.key then
+                rt.active.priority = decision.priority
+            end
+        end
         local candidate = nil
-        local list = { escape, light, env, vitals, gear, season }
-        for _, decision in pairs(list) do
+        for i = 1, 8 do
+            local decision = candidates[i]
             if type(decision) == "table"
                 and decision.key ~= rt.active.key
+                -- [喵喵喵]: 普通需求只改道移动，不打断已开始的采集或连续砍挖；危急抢占照常。 (2026-11-12)
+                and not (rt.active.owner == SUPPLIES_OWNER and rt.active.via == "actions"
+                    and decision.origin == "supplies" and decision.priority < Survival.PRIORITY_STARVE)
                 and (decision.priority > rt.active.priority
-                    or (decision.priority == Survival.PRIORITY_LIGHT
-                        and rt.active.priority == Survival.PRIORITY_LIGHT
-                        and decision.origin == "survival" and rt.active.owner == SUPPLIES_OWNER))
-                and (candidate == nil or decision.priority > candidate.priority) then
+                    or decision == nearby
+                    or (decision.priority == rt.active.priority
+                        and ((decision.origin == "survival" and rt.active.owner == SUPPLIES_OWNER)
+                            -- [喵喵喵]: 进入备灯窗口后停止非危急绕路，同级照明请求也必须接管移动。 (2026-11-12)
+                            or (decision == light and string.sub(rt.active.key or "", 1, 7) == "nearby:"
+                                and (not is_finite_number(snapshot.time_until_night)
+                                    or snapshot.time_until_night <= Supplies.PLAN_TIMEOUT))
+                            or rt.active.key == "vital:search:food")))
+                and (candidate == nil or decision.priority > candidate.priority
+                    or (decision == nearby and decision.priority == candidate.priority)) then
                 candidate = decision
             end
         end
@@ -2613,16 +2885,19 @@ function Survival.Plan(player, snapshot, state)
             tail = "|waiting:" .. tostring(env.purpose)
         elseif type(vitals) == "table" then
             tail = "|waiting:" .. tostring(vitals.purpose)
+        elseif type(stock) == "table" then
+            tail = "|waiting:" .. tostring(stock.purpose)
         elseif type(gear) == "table" then
             tail = "|waiting:" .. tostring(gear.purpose)
         elseif type(season) == "table" then
             tail = "|waiting:" .. tostring(season.purpose)
         elseif escape_reason ~= nil or light_reason ~= nil
             or env_reason ~= nil or vitals_reason ~= nil
-            or gear_reason ~= nil or season_reason ~= nil then
+            or stock_reason ~= nil or gear_reason ~= nil or season_reason ~= nil then
             tail = "|" .. tostring(informative_reason(escape_reason)
                 or informative_reason(env_reason)
                 or informative_reason(vitals_reason)
+                or informative_reason(stock_reason)
                 or informative_reason(gear_reason)
                 or informative_reason(season_reason)
                 or light_reason)
@@ -2630,10 +2905,19 @@ function Survival.Plan(player, snapshot, state)
         return nil, "in_flight:" .. tostring(rt.active.purpose) .. tail
     end
 
-    local decision = escape or light or env or vitals or gear or season
+    -- [喵喵喵]: 空闲与在途使用同一优先级；备灯储量不能因排列在前而压过饥荒求食。 (2026-11-12)
+    local decision = nil
+    for i = 1, 8 do
+        local candidate = candidates[i]
+        if type(candidate) == "table" and (decision == nil or candidate.priority > decision.priority
+            or (candidate == nearby and candidate.priority == decision.priority)) then
+            decision = candidate
+        end
+    end
     local decision_reason = informative_reason(escape_reason)
         or informative_reason(env_reason)
         or informative_reason(vitals_reason)
+        or informative_reason(stock_reason)
         or informative_reason(gear_reason)
         or informative_reason(season_reason)
         or light_reason
@@ -2833,20 +3117,10 @@ function Survival.Report(state, command, status, reason)
             rt.attempts[key] = attempt_of(rt, key) + 1
         end
         count_success(rt, key)
-        if string.sub(key, 1, 7) == "escape:" then rt.efails[key] = nil end
         return true, "terminal:succeeded|" .. key
     end
-    -- [喵喵喵]: 失败一律推进 attempt（下一次同一步自然得到新 id），触顶后进入冷却，
-    -- 于是“反复失败的同一步”不会每个 tick 重新下发。
+    -- [喵喵喵]: 失败推进命令身份；普通操作触顶后冷却，逃生则保留下一快照重评的机会。
     local n = bump_attempt(rt, key)
-    -- [喵喵喵]: 逃命步另有独立的失败计数（见 escape_unavailable）。
-    if string.sub(key, 1, 7) == "escape:" then
-        if type(rt.efails) ~= "table" then
-            rt.efails = {}
-        end
-        rt.efails[key] = num_or(rt.efails[key], 0) + 1
-        prune_key_map(rt.efails, Survival.KEY_MAP_MAX)
-    end
     if n >= Survival.STEP_FAIL_LIMIT then
         mark_blocked(rt, key)
     end

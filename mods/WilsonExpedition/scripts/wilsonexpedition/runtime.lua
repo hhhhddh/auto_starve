@@ -3,6 +3,8 @@ local Actions = require("wilsonexpedition/actions")
 local Navigation = require("wilsonexpedition/navigation")
 local Sailing = require("wilsonexpedition/sailing")
 local Survival = require("wilsonexpedition/survival")
+local Supplies = require("wilsonexpedition/supplies")
+local Exploration = require("wilsonexpedition/exploration")
 local Trace = require("wilsonexpedition/trace")
 local Revision = require("wilsonexpedition/revision")
 local json = require("json")
@@ -14,6 +16,30 @@ Runtime.TARGET_DAYS = 70
 
 local SEASONS = { "autumn", "winter", "spring", "summer" }
 local MODES = { stopped = "已停止", paused = "已暂停", running = "运行中", failed = "本局失败" }
+local TASK_GROUPS = {
+    { "escape", "安全避险" }, { "vitals", "基础生存" }, { "light", "照明准备" },
+    { "supplies", "物资准备" }, { "facilities", "设施推进" },
+    { "season", "四季准备" }, { "explore", "探索地图" },
+}
+local FACILITIES = {
+    researchlab = true, researchlab2 = true, firepit = true, coldfirepit = true,
+    lightning_rod = true, cookpot = true, meatrack = true, icebox = true,
+}
+local SEASON_ITEMS = { heatrock = true, winterhat = true, grass_umbrella = true, strawhat = true, minifan = true }
+
+local function task_group(key, item)
+    key = key or ""
+    if key:match("^escape:") then return "escape" end
+    if key:match("^light:") or key == "reserve:torch" then return "light" end
+    if key:match("^vital:") or key:match("^env:") or key:match("^reserve:cook:") then return "vitals" end
+    if key:match("^season:") then return "season" end
+    if key == "explore" then return "explore" end
+    item = item or key:match("([^:]+)$")
+    if Supplies.LIGHT_ITEMS[item] then return "light" end
+    if FACILITIES[item] then return "facilities" end
+    if SEASON_ITEMS[item] then return "season" end
+    return "supplies"
+end
 
 local function finite(n)
     return type(n) == "number" and n == n and math.abs(n) < math.huge
@@ -267,6 +293,7 @@ function Runtime.Tick(self)
             release(self)
             self.reason = "等待游戏或原生角色控制恢复"
         else
+            if Exploration.Observe(self.player, snapshot, self.state) then self.dirty = true end
             -- [喵喵喵]: 每帧先让策略处理抢占，再只轮询它本次交出的命令；旧执行器先释放。
             local command, why = Survival.Plan(self.player, snapshot, self.state)
             self.reason = why or "等待可执行目标"
@@ -387,14 +414,47 @@ function Runtime:Describe()
         MODES[self.mode] or self.mode, elapsed, Runtime.TARGET_DAYS, #seen, self.reason or "")
 end
 
+function Runtime:DescribeTasks()
+    if self.mode ~= "running" then
+        if self.mode == "failed" then return { "本局任务已结束" } end
+        if self.mode == "paused" then return { "自动任务已暂停" } end
+        return { self.auto_start_pending and "等待自动启动" or "自动任务待启动" }
+    end
+    local statuses = { vitals = "监测中", explore = "待命" }
+    local rt = self.state.survival
+    -- [喵喵喵]: 显示只读调度器现有的执行与候选需求，不为界面额外规划或发出动作。
+    if rt ~= nil then
+        if rt.active ~= nil then
+            statuses[task_group(rt.active.key)] = "执行中"
+            local command = rt.active.command
+            if command ~= nil and (command.purpose == "explore" or (command.purpose or ""):match("^explore:")) then
+                statuses.explore = "执行中"
+            end
+        end
+        if rt.suspended ~= nil then
+            local group = task_group(rt.suspended.key)
+            if statuses[group] ~= "执行中" then statuses[group] = "待处理" end
+        end
+        for _, request in ipairs(rt.demands or {}) do
+            local group = task_group(nil, request.item)
+            if statuses[group] ~= "执行中" then statuses[group] = "待处理" end
+        end
+    end
+    local lines = {}
+    for _, status in ipairs({ "执行中", "待处理", "监测中", "待命" }) do
+        for _, group in ipairs(TASK_GROUPS) do
+            if statuses[group[1]] == status then lines[#lines + 1] = group[2] .. " · " .. status end
+        end
+    end
+    return lines
+end
+
 function Runtime:Close()
     if self.closed then return end
     release(self)
     save(self)
     self.closed = true
     if self.task ~= nil then self.task:Cancel() end
-    for _, handler in ipairs(self.handlers) do handler:Remove() end
-    self.handlers = {}
     if self.panel ~= nil then self.panel:Kill() self.panel = nil end
 end
 
@@ -403,7 +463,7 @@ function Runtime.Attach(player)
     local self = setmetatable({
         player = player, state = {}, memory = {}, mode = "stopped", reason = "进入世界后自动开始",
         auto_start_pending = true,
-        loaded = false, handlers = {}, last_save = GetTime(),
+        loaded = false, last_save = GetTime(),
         save_key = "wilsonexpedition_progress_" .. tostring(player.userid or TheNet:GetUserID()),
     }, { __index = Runtime })
     player._wilsonexpedition = self
@@ -426,19 +486,6 @@ function Runtime.Attach(player)
         end
         self.loaded = true
     end)
-    local function hotkey(key, fn)
-        self.handlers[#self.handlers + 1] = TheInput:AddKeyUpHandler(key, function()
-            if not self.closed and player == ThePlayer and player.HUD ~= nil and not player.HUD:HasInputFocus() then
-                fn()
-            end
-        end)
-    end
-    hotkey(KEY_F6, function()
-        local ok, why = self:Start()
-        if not ok then self.reason = why end
-    end)
-    hotkey(KEY_F7, function() self:Pause("手动暂停") end)
-    hotkey(KEY_F8, function() self:Stop() end)
     player:ListenForEvent("playerdeactivated", function() self:Close() end)
     player:ListenForEvent("onremove", function() self:Close() end)
     self.task = player:DoPeriodicTask(Runtime.INTERVAL, function()

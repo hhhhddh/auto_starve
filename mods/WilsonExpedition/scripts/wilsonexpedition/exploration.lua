@@ -13,7 +13,10 @@
 --     访问记录里没有这一格，而不是"世界地图上未探索"。
 --
 -- 对外接口（goal 全部是纯值表，可直接传给 Navigation.Step）：
---   Exploration.Next(player, snapshot, state) -> goal|nil, reason
+--   Exploration.Observe(player, snapshot, state) -> changed(boolean)
+--       记录实际脚下陆地格；导航执行中也调用，changed 为 true 时保存进度。
+--   Exploration.Next(player, snapshot, state, resource) -> goal|nil, reason
+--       resource 可选，基本生存有余量的采购用它先找已知适宜地形，再探索未知地形。
 --       goal = { x, z, range, priority, id, world,
 --                kind = "ray"|"shore"|"passage"|"base" }
 --   Exploration.Report(state, goal, status, reason) -> ok(boolean), detail
@@ -46,9 +49,9 @@
 --       rt.blocked（GetTime 坐标系），因为 GetTime 重登会重置，拿持久值相减会误判。
 --
 -- 决策行为：
---   * 候选点只在"当前观测半径"内采样（默认 = Observer.NEARBY_RADIUS），
---     不做跨图查询：16 个方向 × 3 层半径(0.4/0.7/1.0 × 半径) 的环形点，
---     外加快照里看得见的海岸探测点(向玩家方向内收，保证落在岸上)与
+--   * 通用探索候选在本地探测半径内采样；资源规划还可使用画面内观测并保存的
+--     适宜地形坐标，不读取隐藏地图。通用候选为
+--     16 个方向 × 3 层半径(0.4/0.7/1.0 × 半径) 的环形点，外加快照里看得见的海岸探测点(向玩家方向内收，保证落在岸上)与
 --     通道地标(passage)。这些点全部经过本地 Map 校验：IsPassableAtPoint
 --     (x,0,z,false,true) 必须是陆地(海洋/船面都不算) 且 IsPointNearHole
 --     为 false；查询失败/地图缺失一律当"未知"跳过并计数，不猜可走。
@@ -93,6 +96,17 @@ local Observer = require('wilsonexpedition/observer')
 local Exploration = {}
 
 Exploration.SCHEMA_VERSION = 1
+Exploration.MAX_TERRAIN = 512
+
+-- [喵喵喵]: 原版房间地皮只说明主要来源，不保证存在资源；已见实物仍由采购层优先取得。 (2026-11-13)
+local RESOURCE_TILES = {
+    goldnugget = { "ROCKY", "DIRT" }, rocks = { "ROCKY", "DIRT" },
+    flint = { "ROCKY", "DIRT", "GRASS" }, nitre = { "ROCKY", "DIRT" },
+    log = { "FOREST", "DECIDUOUS" }, charcoal = { "FOREST", "DECIDUOUS" },
+    cutgrass = { "SAVANNA", "GRASS" }, twigs = { "GRASS", "FOREST", "DECIDUOUS" },
+    berries = { "GRASS", "FOREST", "DECIDUOUS" }, carrot = { "GRASS" },
+    cutreeds = { "MARSH" }, cactus_meat = { "DESERT_DIRT", "DIRT" },
+}
 
 -- [喵喵喵]: 常量全部是有限上限；触顶走明确失败原因，不留无界增长。
 Exploration.GRID = 4                          -- 本地访问/地形缓存网格边长(世界单位)
@@ -124,7 +138,8 @@ Exploration.MAX_PICKS = 128                    -- 连续无进展的选择次数
 Exploration.TERRAIN_TTL = 30                   -- 地形缓存有效期(秒)
 Exploration.TERRAIN_CACHE_MAX = 128            -- 地形缓存条目上限
 Exploration.MAX_WORLDS = 4                     -- 持久记录保留的世界键数
-Exploration.MAX_CELLS = 256                    -- 每个世界保留的格子记录数
+-- [喵喵喵]: 受控简化 — 每世界最多保留 4096 格访问记录；边界：满额仍淘汰旧格；升级：轨迹持续满额且重复求食 → 分层覆盖摘要。 (2026-11-12)
+Exploration.MAX_CELLS = 4096                    -- 每个世界保留的格子记录数
 Exploration.REASON_MAX = 48                    -- 记录里保留的 reason 长度上限
 Exploration.BASE_MIN_DIST = 6                  -- 离基地这么近就算"已在家"
 Exploration.EMPTY_COOLDOWN = 0.75              -- "周边无前沿"结论的复用秒数
@@ -254,6 +269,7 @@ local function reset_runtime(rt, snapshot, world_key)
     rt.session = snapshot.session
     rt.world_key = world_key
     rt.current = nil
+    rt.resource = nil
     rt.last_cell = nil
     rt.picks = 0
     rt.expansions = 0
@@ -308,6 +324,46 @@ local function get_world_record(state, snapshot, rt)
     record.last_tick = store.tick
 
     return record, world_key, nil
+end
+
+local function remember_tile(record, x, z, tile)
+    if not is_finite_number(x) or not is_finite_number(z) or not is_finite_number(tile) then return false end
+    if type(record.terrain_tiles) ~= "table" then record.terrain_tiles, record.n_terrain = {}, 0 end
+    local gx, gz = cell_of(x, z)
+    local key = cell_key(gx, gz)
+    local entry = record.terrain_tiles[key]
+    if entry ~= nil and entry.tile == tile then entry.seen = record.last_tick; return false end
+    if entry == nil then
+        -- [喵喵喵]: 受控简化 — 地形独立淘汰，不占脚步额度；边界：每世界512点；升级：常用地形频繁淘汰 → 区域聚合。
+        if record.n_terrain >= Exploration.MAX_TERRAIN then
+            local oldest_key, oldest
+            for k, point in pairs(record.terrain_tiles) do
+                if oldest == nil or point.seen < oldest then oldest_key, oldest = k, point.seen end
+            end
+            record.terrain_tiles[oldest_key] = nil
+            record.n_terrain = record.n_terrain - 1
+        end
+        record.n_terrain = record.n_terrain + 1
+    end
+    record.terrain_tiles[key] = { x = x, z = z, tile = tile, seen = record.last_tick }
+    return true
+end
+
+local function observed_tile(player, snapshot, record, x, z)
+    local tile = Observer.TerrainAtPoint ~= nil and Observer.TerrainAtPoint(player, snapshot, x, z) or nil
+    if tile ~= nil then remember_tile(record, x, z, tile); return tile end
+    local gx, gz = cell_of(x, z)
+    local entry = type(record.terrain_tiles) == "table" and record.terrain_tiles[cell_key(gx, gz)] or nil
+    return entry ~= nil and entry.tile or nil
+end
+
+local function suitable(resource, tile)
+    local tiles = rawget(_G, "WORLD_TILES")
+    if tile == nil or type(tiles) ~= "table" then return false end
+    for _, name in ipairs(RESOURCE_TILES[resource] or {}) do
+        if tiles[name] ~= nil and tiles[name] == tile then return true end
+    end
+    return false
 end
 
 --------------------------------------------------------------------------
@@ -531,6 +587,38 @@ local function mark_visit(record, rt, x, z)
     return before <= 0
 end
 
+--------------------------------------------------------------------------
+-- [喵喵喵]: 选目标与执行移动分开；导航持有期间也记录真实脚步，不能把走过的中段反复当成新路。 (2026-11-12)
+--------------------------------------------------------------------------
+function Exploration.Observe(player, snapshot, state)
+    if type(state) ~= "table" or type(snapshot) ~= "table" or snapshot.ready ~= true
+        or not is_valid(player) or (ThePlayer ~= nil and player ~= ThePlayer)
+        or snapshot.platform ~= nil or snapshot.ghost == true
+        or (is_finite_number(snapshot.health) and snapshot.health <= 0)
+        or not is_finite_number(snapshot.x) or not is_finite_number(snapshot.z) then
+        return false
+    end
+    local rt = state.explore
+    if type(rt) ~= "table" then
+        rt = {}
+        state.explore = rt
+    end
+    rt.v = Exploration.SCHEMA_VERSION
+    local record = get_world_record(state, snapshot, rt)
+    if record == nil then return false end
+    local changed = false
+    for _, point in ipairs(snapshot.terrain or {}) do
+        if remember_tile(record, point.x, point.z, point.tile) then changed = true end
+    end
+    local gx, gz = cell_of(snapshot.x, snapshot.z)
+    if rt.last_cell == cell_key(gx, gz) then return changed end
+    if terrain_ok(rt, snapshot.x, snapshot.z, now()) ~= true then return changed end
+    if mark_visit(record, rt, snapshot.x, snapshot.z) then
+        rt.picks, rt.expansions = 0, 0
+    end
+    return true
+end
+
 local function scan_horizon()
     local radius = Exploration.SCAN_RADIUS
     if not is_finite_number(radius) or radius <= 0 then
@@ -554,7 +642,7 @@ end
 --------------------------------------------------------------------------
 -- [喵喵喵]: 主入口：选一个目标点，或者明确说"现在没得去"。
 --------------------------------------------------------------------------
-function Exploration.Next(player, snapshot, state)
+function Exploration.Next(player, snapshot, state, resource)
     if type(state) ~= "table" then
         return nil, "state_not_table"
     end
@@ -592,6 +680,10 @@ function Exploration.Next(player, snapshot, state)
     end
 
     local t = now()
+    resource = RESOURCE_TILES[resource] ~= nil and resource or nil
+    if rt.resource ~= resource then
+        rt.current, rt.empty, rt.resource = nil, nil, resource
+    end
 
     -- [喵喵喵]: 本世界第一次拿到坐标就记基地锚点（纯坐标）；调用方可用
     -- SetBase 覆盖成真正的营地位置。
@@ -633,6 +725,10 @@ function Exploration.Next(player, snapshot, state)
             cell.visits = (tonumber(cell.visits) or 0) + 1
             cell.blocked_n = 0
             clear_block_deadline(rt, current.gx, current.gz)
+            if current.resource ~= nil then
+                cell.resource_checks = cell.resource_checks or {}
+                cell.resource_checks[current.resource] = true
+            end
             rt.picks = 0
             rt.expansions = 0
             record.seq = (tonumber(record.seq) or 0) + 1
@@ -659,6 +755,7 @@ function Exploration.Next(player, snapshot, state)
                     priority = current.priority,
                     id = current.id,
                     kind = current.kind,
+                    resource = current.resource,
                     world = world_key,
                 }, string.format("frontier:hold|age=%.1f|dist=%.1f", t - (tonumber(current.t) or t), dist)
             end
@@ -727,9 +824,19 @@ function Exploration.Next(player, snapshot, state)
             - blocked_n * Exploration.TRIES_PENALTY
             - silent_n * Exploration.SILENT_PENALTY
 
-        -- [喵喵喵]: 严格大于才替换，遍历顺序固定 ⇒ 同分结果确定、可复现。
-        if best == nil or score > best.score then
+        local rank = 0
+        if resource ~= nil then
+            local tile = observed_tile(player, snapshot, record, cx, cz)
+            local searched = type(cell) == "table" and type(cell.resource_checks) == "table"
+                and cell.resource_checks[resource] == true
+            rank = suitable(resource, tile) and (searched and 0 or 4)
+                or (visits > 0 and 1 or (tile == nil and 3 or 2))
+            kind = rank == 4 and "resource" or "terrain"
+        end
+        -- [喵喵喵]: 先选择未搜过的适宜地形，再找未知区域；普通探索继续使用既有新鲜度评分。 (2026-11-13)
+        if best == nil or rank > best.rank or (rank == best.rank and score > best.score) then
             best = {
+                rank = rank,
                 x = cx,
                 z = cz,
                 kind = kind,
@@ -781,6 +888,21 @@ function Exploration.Next(player, snapshot, state)
         end
     end
 
+    -- [喵喵喵]: 已知适宜地形可超出近处探测圈；这里只读既有观测坐标，不查询隐藏地形。 (2026-11-13)
+    if resource ~= nil then
+        local known = {}
+        for _, point in pairs(record.terrain_tiles or {}) do known[#known + 1] = point end
+        table.sort(known, function(a, b)
+            if a.x == b.x then return a.z < b.z end
+            return a.x < b.x
+        end)
+        for _, point in ipairs(known) do
+            if suitable(resource, point.tile) and distance(px, pz, point.x, point.z) > horizon then
+                evaluate(point.x, point.z, "resource", 0)
+            end
+        end
+    end
+
     if best == nil then
         local reason = string.format("no_frontier|scanned=%d|terrain=%d|threat=%d|blocked=%d|near=%d",
             stats.scanned, stats.terrain, stats.threat, stats.blocked, stats.near)
@@ -813,6 +935,7 @@ function Exploration.Next(player, snapshot, state)
         range = Exploration.GOAL_RANGE,
         priority = Exploration.GOAL_PRIORITY,
         kind = best.kind,
+        resource = resource,
         world = world_key,
         id = string.format("explore|%s|%s|%d|%d|p%d", best.kind, world_key, best.gx, best.gz, cell.picks),
     }
@@ -823,6 +946,7 @@ function Exploration.Next(player, snapshot, state)
         priority = goal.priority,
         id = goal.id,
         kind = goal.kind,
+        resource = resource,
         gx = best.gx,
         gz = best.gz,
         t = t,
@@ -934,6 +1058,10 @@ function Exploration.Report(state, goal, status, reason)
         cell.visits = (tonumber(cell.visits) or 0) + 1
         cell.blocked_n = 0
         cell.silent_n = 0
+        if goal.resource ~= nil then
+            cell.resource_checks = cell.resource_checks or {}
+            cell.resource_checks[goal.resource] = true
+        end
         clear_block_deadline(rt, gx, gz)
         -- [喵喵喵]: 到达是真实进展，清零连续失败预算。
         rt.picks = 0

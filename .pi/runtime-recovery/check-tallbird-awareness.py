@@ -50,6 +50,7 @@ def fixture(observer_source, navigation_source):
         package.loaded["wilsonexpedition/observer"] = Observer
         package.loaded["wilsonexpedition/navigation"] = Navigation
     ''')
+    baseline.observer_view_fixture(lua)
     return lua
 
 

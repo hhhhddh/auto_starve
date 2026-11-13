@@ -4,7 +4,11 @@
   "completedOptimizations": 3,
   "status": "completed_paused",
   "nextTestAuthorized": false,
-  "goal": {"survivalDays": 70, "allFourSeasons": true, "accepted": false},
+  "goal": {
+    "survivalDays": 70,
+    "allFourSeasons": true,
+    "accepted": false
+  },
   "iterations": [
     {
       "number": 1,
@@ -18,7 +22,9 @@
         "Extend procurement budgets only for actual resource or crafting progress, not navigation arrivals."
       ],
       "validation": "Targeted regressions fail on old source and pass on repaired source; syntax and related checks passed. The repaired version was then used in iteration 2.",
-      "sources": ["mods/WilsonExpedition/scripts/wilsonexpedition/supplies.lua"],
+      "sources": [
+        "mods/WilsonExpedition/scripts/wilsonexpedition/supplies.lua"
+      ],
       "regression": ".pi/runtime-recovery/check-empty-landmarks.py"
     },
     {
@@ -33,7 +39,10 @@
         "Keep retreating until a safe separation is reached before resuming procurement."
       ],
       "validation": "Six targeted threat/retreat regressions and related checks passed. The repaired version was then used in iteration 3.",
-      "sources": ["mods/WilsonExpedition/scripts/wilsonexpedition/navigation.lua", "mods/WilsonExpedition/scripts/wilsonexpedition/survival.lua"],
+      "sources": [
+        "mods/WilsonExpedition/scripts/wilsonexpedition/navigation.lua",
+        "mods/WilsonExpedition/scripts/wilsonexpedition/survival.lua"
+      ],
       "regression": ".pi/runtime-recovery/check-threat-retreat.py"
     },
     {
@@ -48,7 +57,10 @@
         "Reuse full-segment avoidance and emergency retreat/preemption."
       ],
       "validation": "Three targeted threat regressions fail on old source and pass on repaired source. Exploration feedback, syntax and related checks passed. No subsequent game run was started.",
-      "sources": ["mods/WilsonExpedition/scripts/wilsonexpedition/observer.lua", "mods/WilsonExpedition/scripts/wilsonexpedition/navigation.lua"],
+      "sources": [
+        "mods/WilsonExpedition/scripts/wilsonexpedition/observer.lua",
+        "mods/WilsonExpedition/scripts/wilsonexpedition/navigation.lua"
+      ],
       "regression": ".pi/runtime-recovery/check-tallbird-awareness.py"
     }
   ],
@@ -64,10 +76,475 @@
     "Controller JSON replacement retries transient Windows sharing failures for up to two seconds, preserving old state on failure."
   ],
   "remainingValidation": [
-    "Game validation of version 0.1.6.",
+    "Load and validate records 24 and 25: read-only status/tasks, events-none on a future full startup, emergency recovery and protective equipment. Engine collisions, dynamic crowds, counterplay and sustained survival remain unaccepted.",
     "Sustained survival for 70 actual game days across all four seasons.",
-    "Long-run procurement, food, temperature, combat avoidance and inventory behavior.",
-    "Visual continuity of prolonged work/movement and continued execution while the window is unfocused."
+    "Stable cooking and meat supply, controlled combat, long-run memory retention and construction progress.",
+    "Real camera zoom/rotation, screen-edge and weather visibility, inventory behavior and execution while the window is unfocused."
   ],
-  "privacy": "Only derived findings are distributed; raw sessions, user/account identifiers, credentials, logs, captures and world saves stay with their original owner."
+  "privacy": "Only derived findings are distributed; raw sessions, user/account identifiers, credentials, logs, captures and world saves stay with their original owner.",
+  "latestOptimizationRecord": 25,
+  "subsequentBatches": [
+    {
+      "status": "completed_paused",
+      "completedOptimizations": 3,
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "clientProcessReused": true,
+      "gameLanguage": "Simplified Chinese",
+      "iterations": [
+        {
+          "number": 1,
+          "optimizationRecord": 5,
+          "survivalSecondsApprox": 143,
+          "observedFailure": "Native killerbee and wasphive entities lack the hostile tag and were omitted from visible threats.",
+          "changes": [
+            "Recognize visible killerbees and wasp hives.",
+            "Avoid native hive activation and season-adjusted bee acquisition ranges; preserve ordinary bee classification."
+          ],
+          "regression": "check-bee-awareness.py",
+          "validation": "Three targeted old-source failures reproduced; repaired checks and related regressions passed. Loaded during the second round."
+        },
+        {
+          "number": 2,
+          "optimizationRecord": 6,
+          "survivalSecondsApprox": 2388,
+          "observedFailure": "Partially used torches were counted as sufficient lighting; long food procurement blocked replenishment before the fifth night ended.",
+          "changes": [
+            "Budget visible remaining torch fuel against night length and rain consumption.",
+            "Prepare missing night fuel before dark and preempt prolonged food searching while allowing immediate survival food."
+          ],
+          "regression": "check-light-budget.py",
+          "validation": "Three targeted regression groups and related checks passed; the first two reproduce old-source failures. Loaded during the third round."
+        },
+        {
+          "number": 3,
+          "optimizationRecord": 7,
+          "survivalSecondsApprox": 4208,
+          "observedFailure": "At critically low sanity, a crawling horror killed the stationary character while emergency retreat repeatedly waited for pathfinding.",
+          "changes": [
+            "Require native whole-segment reachability before selecting an escape point.",
+            "Try shorter clear retreats when distant routes are obstructed; preserve threat, water, hole and unknown-path rejection.",
+            "Show Chinese task/results in a three-line centered HUD with larger font and spacing, preserving raw diagnostics."
+          ],
+          "regression": "check-retreat-reachability.py",
+          "validation": "Three navigation groups reproduce old-source failures and pass after repair; two Chinese HUD/layout checks and related regressions pass. Repair awaits a newly authorized game run.",
+          "remainingBoundary": "Archived evidence does not identify the exact blocking collider or terrain. Long-term food and sanity recovery still need game validation."
+        }
+      ]
+    },
+    {
+      "status": "completed_paused",
+      "completedOptimizations": 3,
+      "authorizedBatchSize": 3,
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "clientProcessReused": true,
+      "gameLanguage": "Simplified Chinese",
+      "iterations": [
+        {
+          "number": 1,
+          "optimizationRecord": 8,
+          "survivalSecondsApprox": 2210,
+          "observedFailure": "Starvation continued while a cooked-food request collected armor prerequisites for unowned cactus ingredients; future light reserves then displaced the food search.",
+          "changes": [
+            "Only process cooked food after its raw ingredients are carried; when starving also require a visible existing cooker.",
+            "Request directly edible cave bananas without cooking prerequisites.",
+            "Rank future light reserves below starvation while retaining actual darkness/night lighting and threat priority.",
+            "Upgrade in-flight food urgency and allow an acquired meal to interrupt equal-priority procurement."
+          ],
+          "regression": "check-starvation-priority.py",
+          "validation": "Four targeted old-source behavioral failures reproduced and repaired regressions passed. Loaded in the second round; sustained food availability still needs validation.",
+          "remainingBoundary": "Nearby food can be scarce; sustained food and sanity recovery and 70-day seasonal survival remain unaccepted."
+        },
+        {
+          "number": 2,
+          "optimizationRecord": 9,
+          "survivalSecondsApprox": 1855,
+          "observedFailure": "Visible spiders encircled the character; requiring every retreat to move away from every enemy rejected a traversable gap, while ordinary food procurement continued.",
+          "changes": [
+            "Share whole-segment clearance checks across routing, retreat and stuck side steps; preserve current nearest absolute and most urgent relative separation.",
+            "Add tangent candidates for narrow gaps while preserving native terrain/reachability and exclusion of new threat zones.",
+            "Cancel ordinary procurement and keep reassessing escape if no route is confirmed; allow equipping carried light in darkness and show the waiting state in Chinese."
+          ],
+          "regression": "check-swarmed-retreat.py",
+          "validation": "Five targeted groups passed; four reproduce archived old-source behavioral failures. Loaded in the third round with matching new shard sessions and build; no encirclement death was observed in that run. Dynamic avoidance remains unaccepted.",
+          "remainingBoundary": "Offline geometry does not simulate moving attackers, native collision, attack timing or network latency. Long-run food, sanity and seasonal survival remain unaccepted."
+        },
+        {
+          "number": 3,
+          "optimizationRecord": 10,
+          "survivalSecondsApprox": 2867,
+          "observedFailure": "Starvation reduced health, then worn torches exhausted and darkness killed the character. Travel history retained only 256 cells and omitted actual intermediate movement.",
+          "resourceReview": "Five remaining torches were about 12-13 percent fueled and expired sequentially; no natural-light fuel-waste suspicion was detected. Of 95 cells physically traversed in the last two minutes, 57 were absent from saved history.",
+          "changes": [
+            "Observe actual traversed land cells during held navigation without replacing the active command, and mark progress for saving.",
+            "Retain up to 4096 cells per world with the existing serialization and shard/session scope; keep the bounded eviction policy.",
+            "Include day countdown, precipitation and retained-cell count in trace context; match death metadata to the fixed display version."
+          ],
+          "sources": [
+            "exploration.lua",
+            "runtime.lua",
+            "trace.lua"
+          ],
+          "regression": "check-exploration-memory.py",
+          "validation": "Four targeted groups passed; three reproduce missing footsteps, premature forgetting or missing trace context on archived old source. Related regressions and complete deployment checks passed. No next game run was approved.",
+          "remainingBoundary": "The expanded history is still bounded. Native collision, resource distribution, long-run food/sanity recovery and 70-day seasonal survival need game validation."
+        }
+      ]
+    },
+    {
+      "authorizedBatchSize": 5,
+      "iterations": [
+        {
+          "number": 1,
+          "optimizationRecord": 12,
+          "survivalSecondsApprox": 1968,
+          "observedFailure": "Spiders killed the character after about 24 seconds waiting for a safe exit near spider nests.",
+          "resourceReview": "No natural-light torch-consumption suspicion was recorded. Long-run food and material supply remains unaccepted.",
+          "changes": [
+            "Cover the native maximum nine-meter nest creep radius with a two-meter avoidance margin.",
+            "Use matching ignorecreep-only land capabilities for LOS and path searches; preserve physical boundaries, unknown-path rejection and full-segment visible threat checks."
+          ],
+          "regression": "check-spider-web-navigation.py",
+          "validation": "Four regression groups passed; three reproduce behavioral failures on pre-repair source. Related navigation/procurement checks passed. Native collision and moving attackers remain game-validation boundaries.",
+          "remainingBoundary": "The archive does not record the engine result for each rejected candidate; it cannot establish that every blocked exit was caused by creep."
+        },
+        {
+          "number": 2,
+          "optimizationRecord": 13,
+          "survivalSecondsApprox": 1402,
+          "observedFailure": "Five pig-guard attacks killed the character at night; the visible threat list recorded a spider but omitted the guard.",
+          "resourceReview": "Batch procurement acquired 20 grass and 12 logs; no comparable-world efficiency gain is claimed. No ambient-light torch-waste suspicion was recorded.",
+          "changes": [
+            "Recognize visible pigguard and pigtorch without relying on hostile tags.",
+            "Apply the native spring-expanded guard targeting distance and a two-meter margin to guards and protected torches; preserve neutral pigs and existing full-segment/preemption rules."
+          ],
+          "regression": "check-pigguard-awareness.py",
+          "validation": "Four regression groups passed and reproduce failures on pre-repair source; includes native GuardRetargetFn replay. Related navigation, escape and stock tests passed.",
+          "remainingBoundary": "Native collision, moving guards, other protected centers and night-time combined threats require game validation.",
+          "gameValidation": "Loaded on the third test round with both new shard sessions and automatic client gathering confirmed; actual guard avoidance remains under validation."
+        },
+        {
+          "number": 3,
+          "optimizationRecord": 14,
+          "survivalSecondsApprox": 2917,
+          "observedFailure": "Starvation on the seventh morning while a surface food task searched for cave bananas.",
+          "resourceReview": "No attacking entity or ambient-light torch-waste suspicion was recorded; food and construction progress remain unaccepted.",
+          "changes": [
+            "Use the current projected camera viewport, native frustum and player visibility rules rather than fixed scan radii or result counts.",
+            "Keep 512 observed resource cells per category and shard, retain depleted states and cross-request exclusions, and preserve world isolation.",
+            "Filter food sources by shard; allow materials and facilities before ordinary food stock, bound unproductive stock searches, and preserve emergency preemption."
+          ],
+          "regression": "check-screen-food-memory.py",
+          "validation": "Six regression groups passed; six behavioral failures reproduced on pre-repair source. Eighteen Lua and three core Python files passed syntax validation; full offline deployment regressions and privacy scan passed. Three startup API failure scenarios also reproduced on the faulty startup source, with the fixture matching the native Entity interface.",
+          "gameValidation": "Corrected native Entity visibility interface; same saved fourth-round shard sessions and the new source start were verified after controlled process recovery. Autonomous grass/twig acquisition and light equip/unequip confirmed. Weather, zoom, occlusion and long-term survival remain under gameplay validation.",
+          "remainingBoundary": "Bounded memory, real camera and visibility/weather behavior, cooking production, controlled combat and sustained survival require game validation."
+        },
+        {
+          "number": 4,
+          "optimizationRecord": 15,
+          "survivalSecondsApprox": 1236,
+          "observedFailure": "Starvation on the third dusk; ordinary material procurement resumed while all urgent food requests were cooling down.",
+          "resourceReview": "No attacker or ambient-light torch-waste suspicion; ordinary material acquisition during famine was unproductive. Trace samples are not action counts.",
+          "changes": [
+            "Keep safe frontier exploration at famine priority while food requests cool down, retaining source cooldowns and actual exploration receipts.",
+            "Stop ordinary procurement when no safe frontier exists; allow food procurement and eating to replace equal-priority famine exploration.",
+            "Retain danger, current illumination, environmental emergencies and the ordinary food-search budget; add a Chinese famine-search status."
+          ],
+          "regression": "check-famine-fallback.py",
+          "validation": "Five regression groups passed and all five reproduced behavioral failures on pre-repair source. Eighteen Lua and three core Python files passed syntax checks; full offline deployment regressions and privacy scan passed.",
+          "gameValidation": "Loaded in the fifth round with two new shard sessions, approved source start and autonomous actions confirmed; actual famine recovery remains under validation.",
+          "remainingBoundary": "Safe exploration cannot guarantee food availability; stable food production, controlled combat and four-season survival need game validation."
+        },
+        {
+          "number": 5,
+          "optimizationRecord": 16,
+          "survivalSecondsApprox": 440,
+          "observedFailure": "Darkness killed the character on the first night; it held only one grass after prolonged bulk grass exploration.",
+          "resourceReview": "No light was carried and no inventory decreases or ambient-light torch-waste suspicions were recorded. Visible missing twigs were not acquired before searching for grass.",
+          "changes": [
+            "Prepare the first usable overnight light during surface daylight before ordinary bulk stock and construction, retaining famine and current-danger priority.",
+            "Acquire safe visible missing recipe ingredients before recursively exploring other deficits; preserve exact inventory confirmations, native crafting eligibility and dark-travel limits."
+          ],
+          "regression": "check-first-light-supplies.py",
+          "validation": "Four targeted groups passed and reproduce all four failures on archived old source; native torch ingredients, safety boundaries, eighteen Lua and three core Python syntax checks and complete offline deployment regressions passed.",
+          "gameValidation": "Awaiting new authorization. No sixth round approved; current failed world remains paused.",
+          "remainingBoundary": "Visible ingredients do not guarantee sufficient resources or successful survival. Food production, controlled combat and four-season acceptance remain incomplete."
+        }
+      ],
+      "status": "completed_paused",
+      "completedOptimizations": 5,
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "clientProcessReused": true,
+      "gameLanguage": "Simplified Chinese",
+      "nextTestAuthorized": false,
+      "startupRecoveryRequired": true,
+      "clientProcessPolicy": "Normal resets reused the client. A fourth-round visibility API startup failure required controlled recovery using the same saved shard sessions."
+    },
+    {
+      "authorizedBatchSize": 3,
+      "baselineOptimizationRecord": 18,
+      "completedOptimizations": 3,
+      "status": "completed_paused",
+      "baselineIncludes": [
+        16,
+        17,
+        18
+      ],
+      "currentValidation": "Three authorized rounds and repairs completed; final display/retreat changes are installed and await future explicit test authorization.",
+      "completionPolicy": "After the third new optimization and checks, retain the paused fault world and report; do not launch a fourth round.",
+      "iterations": [
+        {
+          "number": 1,
+          "optimizationRecord": 20,
+          "includedOfflineOptimization": 19,
+          "survivalSecondsApprox": 1450,
+          "observedFailure": "Werepig pursuit while threat classification and contact retention were incomplete.",
+          "changes": [
+            "Recognize pig variants and native acquisition distances; continue retreat using bounded last-visible coordinates.",
+            "Load unified visible collection/mining sources and safe perishable-first eating."
+          ],
+          "regression": "check-pig-pursuit.py and check-multisource-food.py",
+          "validation": "Targeted, deployment and syntax checks passed; loaded in round two."
+        },
+        {
+          "number": 2,
+          "optimizationRecord": 23,
+          "includedOfflineOptimization": 22,
+          "survivalSecondsApprox": 2182,
+          "observedFailure": "Werepig pursuit with repeated short retreat completion and native stop points.",
+          "changes": [
+            "Prefer longer whole-segment verified retreat legs, preserving safe short alternatives.",
+            "Load seed exclusion, collision-edge work stands and nearby compatible stack top-up."
+          ],
+          "regression": "check-retreat-legs.py and check-seed-mining-stacks.py",
+          "validation": "Targeted, deployment and syntax checks passed; loaded in round three."
+        },
+        {
+          "number": 3,
+          "optimizationRecord": 25,
+          "includedOfflineOptimization": 24,
+          "survivalSecondsApprox": 6057,
+          "observedFailure": "Day-thirteen dusk spider death; terminal emergency route failure led to a procurement cooldown while armor stayed in inventory.",
+          "changes": [
+            "Re-evaluate emergency retreats after failures and timeouts with fresh IDs while preserving per-route bounds.",
+            "Prepare existing protection at a safe separation without stopping ongoing retreats.",
+            "Install compact read-only status/tasks for future loading."
+          ],
+          "regression": "check-escape-recovery.py",
+          "validation": "Five groups and four old-source failures, full deployment and syntax passed; final repair is not yet game-loaded."
+        }
+      ],
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "clientProcessReused": true,
+      "gameLanguage": "Simplified Chinese",
+      "nextRoundAuthorized": false,
+      "resourceReview": "No new light-waste flags in the reviewed final trace; visible losses matched food consumption and torch preparation. Random-world durations do not establish comparative performance."
+    }
+  ],
+  "offlineOptimizations": [
+    {
+      "optimizationRecord": 11,
+      "date": "2026-11-12",
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "gameValidated": false,
+      "observedProblem": "Basic stock targets were small and below ordinary crafting progress; food requests mixed nutrition-based deficits with piece counts, encouraging repeated short gathering trips.",
+      "changes": [
+        "Use low-stock triggers and persistent runtime batch targets: grass/twigs 8 to 20, flint 4 to 8, logs 6 to 12.",
+        "Prioritize routine stock above ordinary technology/equipment progression while preserving emergency preemption.",
+        "Use edible nutritional stock 4 to 8 with candidate-specific yield and freshness; continue to the target after crossing the low mark.",
+        "Preserve capacity checks, procurement budgets and early use of carried emergency food."
+      ],
+      "validation": "Three targeted groups passed; two old-source comparisons reproduce small batch targets and low-calorie reserve miscount. Native planner batch termination, emergency preemption and inventory-full checks passed.",
+      "regression": "check-stock-batching.py",
+      "remainingBoundary": "No game restart or world reset was authorized for this offline change. Actual travel savings, resource availability and freshness require subsequent game validation."
+    },
+    {
+      "optimizationRecord": 17,
+      "date": "2026-11-12",
+      "gameValidated": false,
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "observedProblem": "A single active procurement request ignored closer visible materials and food required by other active goals, and held movement did not reconsider such opportunities.",
+      "changes": [
+        "Aggregate active demand deficits and prefer the nearest safely obtainable visible resource; combine shared recipe costs and stock floors.",
+        "Retain independent refill batches, deduplicate tools and stations, and stop considering fulfilled needs.",
+        "Re-evaluate movement using a handoff margin while retaining issued collection and continuous work; preserve native crafting, lighting deadlines, emergencies, capacity, search budgets and failed-target cooldowns."
+      ],
+      "regression": "check-nearby-demands.py",
+      "validation": "Five targeted groups passed; three old-source behavioral failures reproduced. Eighteen Lua and three core Python syntax checks, related regressions, complete offline deployment and privacy checks passed.",
+      "remainingBoundary": "Actual path lengths, moving enemies, collisions and resource yields need live verification. Food production, controlled combat and four-season acceptance remain incomplete.",
+      "codeLoaded": true,
+      "gameValidation": "Loaded in a later three-round baseline; both new shard sessions, approved source startup and autonomous gathering confirmed. Survival, terrain routes and resource yields remain under validation."
+    },
+    {
+      "optimizationRecord": 18,
+      "date": "2026-11-13",
+      "gameValidated": false,
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "observedProblem": "Resource procurement fell back to generic local exploration without using observed terrain or the currently missing raw material.",
+      "changes": [
+        "Prefer visible resources and known landmarks, then suitable observed terrain or unknown frontiers for the actual material.",
+        "Persist bounded visible ground samples separately from footsteps and distinguish passed-through regions from completed resource searches.",
+        "Retain native visibility, safety, emergency lighting, hunger, night deadlines and route validation."
+      ],
+      "regression": "check-terrain-planning.py",
+      "validation": "Five targeted groups and five old-source behavioral failures reproduced. Eighteen Lua and three core Python syntax checks, related regressions, complete offline deployment and privacy checks passed.",
+      "remainingBoundary": "Live camera, terrain sampling, remembered regions and route yields need game validation. Stable food production, controlled combat and four-season acceptance remain incomplete.",
+      "codeLoaded": true,
+      "gameValidation": "Loaded in a later three-round baseline; both new shard sessions, approved source startup and autonomous gathering confirmed. Survival, terrain routes and resource yields remain under validation."
+    },
+    {
+      "optimizationRecord": 19,
+      "date": "2026-11-13",
+      "gameValidated": false,
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "observedProblem": "Nearby workable resource sources lost to distant loose items; safe meals waited for low hunger and did not prioritize perishability.",
+      "changes": [
+        "Compare visible pickup and usable work sources across direct, recipe and shared-demand planning.",
+        "Allow native-ready first-tool crafting while preventing impossible flint bootstrap cycles.",
+        "Eat safe, absorbable meals by perishability using native hunger capacity and stale-food nutrition; preserve active nearby cooking and action continuity."
+      ],
+      "regression": "check-multisource-food.py",
+      "validation": "Five targeted groups and five old-source failures passed. Eighteen client Lua and three core Python syntax checks, complete offline deployment, privacy and diff checks passed.",
+      "remainingBoundary": "Needs live validation of mining, tool bootstrap, meals and cooking routes; no measured time or waste reduction yet.",
+      "gameValidation": "Loaded in a newly authorized round with both new shard sessions, source start and autonomous acquisition confirmed; targeted live behavior remains under validation."
+    },
+    {
+      "optimizationRecord": 20,
+      "date": "2026-11-13",
+      "gameValidated": false,
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "observedProblem": "Pig pursuit killed the character after retreat alternated with normal procurement and briefly losing sight was treated as safety.",
+      "changes": [
+        "Recognize native pig variants and use native acquisition distances while preserving neutral pigs.",
+        "Continue retreat from bounded last-visible contact without reading hidden entity state; refresh on visible reacquisition and clear on neutral return, expiry or scope change."
+      ],
+      "regression": "check-pig-pursuit.py",
+      "survivalSecondsApprox": 1450,
+      "validation": "Seven targeted groups, five archived-source behavioral reproductions, full offline deployment, syntax, privacy and diff checks passed.",
+      "remainingBoundary": "Pursuit release, dark visibility and terrain still require live validation; original operator test permissions do not transfer.",
+      "gameValidation": "Loaded in a newly authorized round with both new shard sessions, source start and autonomous acquisition confirmed; targeted live behavior remains under validation."
+    },
+    {
+      "optimizationRecord": 21,
+      "date": "2026-11-13",
+      "kind": "notification-infrastructure",
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "observedProblem": "Project-wide watchers delivered one death task to unrelated conversations and overwrote shared readiness and receipt files.",
+      "changes": [
+        "Bind one designated conversation explicitly and gate every heartbeat and notification by its live identity.",
+        "Notify only the currently paused controller run; require a matching target heartbeat during preflight."
+      ],
+      "regression": "wilson-notifier-check.mjs",
+      "validation": "Seven routing groups, an old-source unauthorized-wakeup reproduction, deployment preflight cases, syntax and related controller checks passed.",
+      "remainingBoundary": "Reload every already-open project listener before relying on the route; verify target heartbeat and live delivery. Gameplay batch count is unchanged.",
+      "runtimeValidated": false
+    },
+    {
+      "optimizationRecord": 22,
+      "date": "2026-11-13",
+      "gameValidated": false,
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "observedProblem": "Seed inventory participated in food planning; center-based work approaches could stop at the collision boundary, and existing partial stacks were ignored after demand targets were met.",
+      "changes": [
+        "Preserve seeds and exclude them from food nutrition and acquisition.",
+        "Choose a native walkable stand outside visible collision bodies before native target work.",
+        "Allow immediately reachable safe resources to fill a carried compatible stack without adding surplus travel or preempting ready crafting and emergencies."
+      ],
+      "regression": "check-seed-mining-stacks.py",
+      "targetedGroupsPassed": 5,
+      "oldSourceFailuresReproduced": 5,
+      "validation": "Targeted/native-source replays, archived-source failures, full offline deployment, 18 Lua/3 core Python syntax, privacy and source consistency checks passed. Game loading pending.",
+      "remainingBoundary": "Engine collision, live resource yield and pursuit require game validation; faster enemies still require counterplay. Operator test authorization does not transfer.",
+      "gameValidation": "Both new shard sessions, new source start and autonomous acquisition confirmed in the authorized final round; actual collision and pursuit benefits remain under validation."
+    },
+    {
+      "optimizationRecord": 23,
+      "date": "2026-11-13",
+      "gameValidated": false,
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "observedProblem": "An observed pig variant continued pursuit while short retreat legs repeatedly completed and stopped native motion.",
+      "changes": [
+        "Prefer a whole-segment verified longer escape using the threat warning radius and clearance.",
+        "Retain short disengagement when long routes are blocked, unknown-route refusal, last-visible contact, final stop and cancellation."
+      ],
+      "regression": "check-retreat-legs.py",
+      "targetedGroupsPassed": 3,
+      "oldSourceFailuresReproduced": 2,
+      "validation": "Targeted/native-source replays, archived-source failures, full offline deployment, 18 Lua/3 core Python syntax, privacy and source consistency checks passed. Game loading pending.",
+      "remainingBoundary": "Engine collision, live resource yield and pursuit require game validation; faster enemies still require counterplay. Operator test authorization does not transfer.",
+      "gameValidation": "Both new shard sessions, new source start and autonomous acquisition confirmed in the authorized final round; actual collision and pursuit benefits remain under validation."
+    },
+    {
+      "optimizationRecord": 24,
+      "date": "2026-11-13",
+      "kind": "display-and-next-start-settings",
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "gameValidated": false,
+      "changes": [
+        "Compact read-only translucent yellow status with an adjacent live task summary.",
+        "Use actual scheduler work, candidates and inactive modes without adding automation commands.",
+        "Set both owned world configurations to specialevent none on the next full controller startup after idle/ownership checks."
+      ],
+      "regression": "check-task-panel.py and HUD checks in check-retreat-reachability.py",
+      "validation": "Three task/settings groups, updated HUD checks and full offline deployment passed; syntax and privacy gates apply before delivery.",
+      "remainingBoundary": "Display Lua is installed after the final round paused; visual rendering, scale and events-none receipts await a future explicitly authorized full startup."
+    },
+    {
+      "optimizationRecord": 25,
+      "date": "2026-11-13",
+      "gameValidated": false,
+      "displayVersions": {
+        "client": "0.1.6",
+        "diagnostics": "0.1.0"
+      },
+      "observedProblem": "Terminal retreat failure incorrectly applied procurement cooldown to emergency movement; a carried grass suit never replaced the backpack.",
+      "changes": [
+        "Keep each route bounded, advance terminal identities and re-evaluate visible escape opportunities without a procurement cooldown.",
+        "Prepare carried non-slowing protection at a safe separation without stopping active retreats, replacing seasonal clothing or displacing held light."
+      ],
+      "regression": "check-escape-recovery.py",
+      "targetedGroupsPassed": 5,
+      "oldSourceFailuresReproduced": 4,
+      "validation": "Five targeted groups, four archived-source failure reproductions, 18 Lua/3 core Python syntax, full offline deployment and 79-file privacy gates passed.",
+      "remainingBoundary": "Physical crowd escape, armor swap receipts, dynamic threats and long-term survival still need game validation. No additional round is authorized."
+    }
+  ]
 }

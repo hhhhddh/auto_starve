@@ -81,8 +81,25 @@ with patch("winreg.OpenKey"), patch("winreg.QueryValueEx", return_value=(12345, 
 assert profile["account"] == "12345"
 assert cluster.is_relative_to(Path(sys.argv[1]) / ".local/dst")
 assert report["agentExtension"]["ready"] is False
+heartbeat = {"schema": "wilson-expedition/agent-ready@1", "routing": "explicit-session@1",
+             "sessionId": "notifier-owner", "status": "active", "updatedUtc": iteration.now()}
+iteration.write_json(iteration.PRIVATE / "iteration-agent-ready.json", heartbeat)
+with patch.dict(iteration.os.environ, {"PI_SESSION_ID": "notifier-owner"}):
+    assert iteration.preflight()["agentExtension"]["ready"] is False, "a heartbeat alone cannot bind a conversation"
+    iteration.write_json(iteration.PRIVATE / "iteration-agent-target.json",
+                         {"schema": "wilson-expedition/agent-target@1", "sessionId": "notifier-owner"})
+    assert iteration.preflight()["agentExtension"]["ready"] is True
+    routing = heartbeat.pop("routing")
+    iteration.write_json(iteration.PRIVATE / "iteration-agent-ready.json", heartbeat)
+    assert iteration.preflight()["agentExtension"]["ready"] is False, "an old listener cannot confirm the routing repair is active"
+    heartbeat["routing"] = routing
+    heartbeat["sessionId"] = "another-conversation"
+    iteration.write_json(iteration.PRIVATE / "iteration-agent-ready.json", heartbeat)
+    assert iteration.preflight()["agentExtension"]["ready"] is False, "a foreign heartbeat cannot authorize launch"
 assert iteration.config_table(cluster / "Master/worldgenoverride.lua")["preset"] == "ENDLESS"
 assert iteration.config_table(cluster / "Caves/worldgenoverride.lua")["preset"] == "DST_CAVE"
+for shard in ("Master", "Caves"):
+    assert iteration.config_table(cluster / shard / "worldgenoverride.lua")["overrides"]["specialevent"] == "none"
 settings = iteration.configparser.ConfigParser()
 settings.read(Path(profile["clientStorageRoot"]) / profile["clientConfDir"] / "settings.ini", encoding="utf-8")
 assert settings.getboolean("MISC", "modswarning") is False
@@ -92,7 +109,7 @@ print(json.dumps({"prepared": True, "validation": report["validation"]}))
 '''
         prepared = json.loads(run(checkout, ["-c", probe, str(checkout)]).stdout)
         assert prepared["prepared"] is True
-        assert prepared["validation"]["luaFiles"] == 17
+        assert prepared["validation"]["luaFiles"] == 18
 
         feature = checkout / "mods/WilsonExpedition/scripts/widgets/wilsonexpeditionpanel.lua"
         feature.write_text(feature.read_text(encoding="utf-8") + "\n-- deployment regression\n", encoding="utf-8")

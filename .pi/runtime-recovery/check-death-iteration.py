@@ -60,14 +60,15 @@ def runtime():
         function stub_planners()
             calls = {}
             package.loaded["wilsonexpedition/observer"] = {}
-            package.loaded["wilsonexpedition/navigation"] = { OWNER = "navigation", Cancel = function() end }
+            package.loaded["wilsonexpedition/navigation"] = { OWNER = "navigation", GOAL_RANGE = 1.5, Cancel = function() end }
             package.loaded["wilsonexpedition/sailing"] = {}
             package.loaded["wilsonexpedition/exploration"] = {
                 OWNER = "exploration", Cancel = function() end,
                 Plan = function() return { id = "explore", purpose = "explore", owner = "exploration" } end,
             }
             package.loaded["wilsonexpedition/supplies"] = {
-                OWNER = "supplies", LIGHT_ITEMS = { torch = true },
+                OWNER = "supplies", LIGHT_ITEMS = { torch = true }, PLAN_TIMEOUT = 180,
+                NearbyRequest = function() return nil end,
                 Plan = function(_, _, _, request)
                     calls[#calls + 1] = request.item
                     return { id = request.id, owner = "supplies", purpose = "request:" .. request.item,
@@ -90,6 +91,62 @@ def native_method(lua, file, owner, name):
     if match is None:
         raise AssertionError(f"Native method not found: {owner}:{name}")
     lua.execute(match.group(0))
+
+
+def observer_view_fixture(lua):
+    """Model native projection/rendering and execute the vanilla client sight rules."""
+    text = (NATIVE_SCRIPTS / "simutil.lua").read_text(encoding="utf-8-sig")
+    assert ".entity:IsVisible()" in (NATIVE_SCRIPTS / "prefabs/acorn.lua").read_text(encoding="utf-8-sig")
+    assert "function EntityScript:IsVisible(" not in (NATIVE_SCRIPTS / "entityscript.lua").read_text(encoding="utf-8-sig")
+    lua.globals().VANILLA_SIGHT = text[text.index("local function _CanEntitySeeInDark"):text.index("function SpringCombatMod")]
+    lua.execute('''
+        TheSim = TheSim or {}
+        view_half_width, view_half_height, view_rotation = 50, 35, 0
+        function TheSim:GetScreenSize() return 1280, 720 end
+        function TheSim:ProjectScreenPos(sx, sy)
+            local a, b = (sx / 640 - 1) * view_half_width, (sy / 360 - 1) * view_half_height
+            local px, _, pz = player.Transform:GetWorldPosition()
+            return px + a * math.cos(view_rotation) - b * math.sin(view_rotation), 0,
+                pz + a * math.sin(view_rotation) + b * math.cos(view_rotation)
+        end
+        function TheSim:GetScreenPos(x, y, z)
+            local px, _, pz = player.Transform:GetWorldPosition()
+            local dx, dz = x - px, z - pz
+            return (1 + (dx * math.cos(view_rotation) + dz * math.sin(view_rotation)) / view_half_width) * 640,
+                (1 + (-dx * math.sin(view_rotation) + dz * math.cos(view_rotation)) / view_half_height) * 360
+        end
+        TheCamera = { GetDistance = function() return 20 end }
+        if TheSim.GetLightAtPoint == nil then TheSim.GetLightAtPoint = function() return 1 end end
+        TUNING.DARK_CUTOFF, TUNING.SANDSTORM_VISION_RANGE_SQ = 0.2, 196
+        function attach_view(e)
+            e.components = e.components or {}
+            e.entity = { FrustumCheck = function()
+                local x, y, z = e.Transform:GetWorldPosition()
+                local sx, sy = TheSim:GetScreenPos(x, y, z)
+                local pad = e.screen_padding or 0
+                return sx >= -pad and sx <= 1280 + pad and sy >= -pad and sy <= 720 + pad
+            end, IsVisible = function() return e.render_visible ~= false end }
+            e.IsVisible = nil
+            function e:GetDistanceSqToPoint(x, y, z)
+                local px, _, pz = self.Transform:GetWorldPosition()
+                return (x - px)^2 + (z - pz)^2
+            end
+            return e
+        end
+        if not entity_has_view then
+            local old_entity = entity
+            entity = function(...) return attach_view(old_entity(...)) end
+            entity_has_view = true
+        end
+        for _, e in ipairs(TheSim.FindEntities and TheSim:FindEntities(0, 0, 0, 10000) or {}) do attach_view(e) end
+        attach_view(player)
+        player.components.playervision = {
+            HasNightVision = function() return night_vision == true end,
+            HasGoggleVision = function() return goggle_vision == true end,
+        }
+        function player:IsInAnyStormOrCloud() return in_storm == true end
+        assert(loadstring(VANILLA_SIGHT))()
+    ''')
 
 
 def check_inventory():
@@ -228,7 +285,7 @@ def check_light_observation():
     native_method(lua, "components/clock.lua", "self", "GetTimeUntilPhase")
     lua.execute('''
         TheWorld.net = { components = { clock = self } }
-        TheWorld.state = { cycles = 0, phase = "dusk", time = 0.8, timeinphase = 0.9 }
+        TheWorld.state = { cycles = 0, phase = "dusk", time = 0.8, timeinphase = 0.9, precipitationrate = 0.7 }
         function TheWorld:HasTag(tag) return tag == "forest" end
         TheSim = {
             GetLightAtPoint = function() return 1 end,
@@ -238,6 +295,8 @@ def check_light_observation():
         local Observer = require("wilsonexpedition/observer")
         local s = Observer.Observe(player, {})
         assert(s.time_until_night == 12, "must observe the native phase countdown")
+        assert(s.time_until_day == 72 and s.precipitation_rate == 0.7,
+            "fuel preparation needs the native dawn countdown and visible rain rate")
         assert(math.abs(s.light.ambient - 150 / 255) < 0.00001, "ambient must exclude portable lights")
         phase_index, remaining = 1, 10
         s = Observer.Observe(player, {})

@@ -28,7 +28,7 @@
 --
 -- 原生常量（components/locomotor.lua:8-10）：搜索状态 0=CALCULATING 1=FOUNDPATH
 -- 2=NOPATH；接口 SubmitSearch/GetSearchStatus/GetSearchResult/KillSearch/IsClear，
--- pathcaps=nil 即"只走陆地"，与玩家自身 locomotor 缺省一致。
+-- 陆地查询忽略可步行的蛛网，威胁检查仍单独限制巢穴与蜘蛛附近的路线。
 --
 -- 两个硬前提（调用方必须遵守）：
 --   1) 单活跃控制器：同一时刻只能有一个处理器（本模块/战斗/采集…）驱动 Actions，
@@ -66,16 +66,33 @@ local ROOK_AVOID_RADIUS = (type(TUNING.ROOK_TARGET_DIST) == "number" and TUNING.
 -- [喵喵喵]: 护巢索敌比主动索敌更远，春季还会扩大；统一避让范围需覆盖原版上限。 (2026-11-12)
 local TALLBIRD_AVOID_RADIUS = math.max(TUNING.TALLBIRD_TARGET_DIST or 8, TUNING.TALLBIRD_DEFEND_DIST or 12)
     * math.max(1, TUNING.SPRING_COMBAT_MOD or 1.33) + 2
+-- [喵喵喵]: 守卫自身和它保护的猪火炬都是索敌中心，避让须覆盖春季最大范围。 (2026-11-12)
+local PIG_GUARD_AVOID_RADIUS = (TUNING.PIG_GUARD_TARGET_DIST or 8)
+    * math.max(1, TUNING.SPRING_COMBAT_MOD or 1.33) + 2
+-- [喵喵喵]: 疯猪仍用 pigman prefab；索敌为 SpringCombatMod(PIG_TARGET_DIST)，月猪沿用更保守的同一范围。 (2026-11-13)
+local WEREPIG_AVOID_RADIUS = (TUNING.PIG_TARGET_DIST or 16)
+    * math.max(1, TUNING.SPRING_COMBAT_MOD or 1.33) + 2
 Navigation.THREAT_RADII = {
     rook = ROOK_AVOID_RADIUS,
     rook_nightmare = ROOK_AVOID_RADIUS,
     tallbird = TALLBIRD_AVOID_RADIUS,
+    -- [喵喵喵]: 原版蜂巢在 10 米放蜂，杀人蜂按 SpringCombatMod(8) 索敌；余量覆盖观测延迟。 (2026-11-12)
+    killerbee = 8 * math.max(1, TUNING.SPRING_COMBAT_MOD or 1.33) + 2,
+    wasphive = 10 + 2,
+    pigguard = PIG_GUARD_AVOID_RADIUS,
+    pigtorch = PIG_GUARD_AVOID_RADIUS,
+    pigman = WEREPIG_AVOID_RADIUS,
+    moonpig = WEREPIG_AVOID_RADIUS,
+    -- [喵喵喵]: 三级巢的蛛网半径最大 9 米，踩网会放出蜘蛛；余量覆盖角色体积与观测延迟。 (2026-11-12)
+    spiderden = 9 + 2,
 }
 Navigation.THREAT_PAD = 2.5          -- 航点须比"我们现在"更远离威胁的余量
 Navigation.NOT_READY_TIMEOUT = 6     -- 快照一直不 ready 就失败
 Navigation.RETREAT_DISTANCE = 8
 Navigation.SIDE_STEP = 6             -- 卡住时先侧移/后退一小步再重规划
 Navigation.WAYPOINT_SPACING = 0.5    -- 搜索结果里过密的点合并
+
+local LAND_PATH_CAPS = { ignorecreep = true }
 
 local function is_finite_number(v)
     return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
@@ -174,8 +191,26 @@ local function nearest_threat(x, z, threats)
     return best
 end
 
--- [喵喵喵]: 两端安全也可能穿过索敌区；圈内撤退须全程远离每个可见威胁。 (2026-11-12)
+-- [喵喵喵]: 已在多个索敌区内时，逐个要求远离会把交叉包围判成无路。
+-- 保持最近敌人的实际间距及最紧迫威胁的相对余量，允许绕开较远敌人；区外威胁仍禁止进入。 (2026-11-12)
+local function starting_clearance(px, pz, threats)
+    local nearest2, relative = math.huge, math.huge
+    for _, threat in ipairs(threats or {}) do
+        if is_finite_number(threat.x) and is_finite_number(threat.z) then
+            local dx, dz = threat.x - px, threat.z - pz
+            local start2 = dx * dx + dz * dz
+            local radius = Navigation.THREAT_RADII[threat.prefab] or Navigation.THREAT_RADIUS
+            if start2 <= radius * radius then
+                nearest2 = math.min(nearest2, start2)
+                relative = math.min(relative, start2 / (radius * radius))
+            end
+        end
+    end
+    return nearest2, relative
+end
+
 local function waypoint_is_safe(x, z, px, pz, threats)
+    local nearest2, relative = starting_clearance(px, pz, threats)
     local dx, dz = x - px, z - pz
     local length2 = dx * dx + dz * dz
     for _, threat in ipairs(threats or {}) do
@@ -183,43 +218,41 @@ local function waypoint_is_safe(x, z, px, pz, threats)
             local tx, tz = threat.x - px, threat.z - pz
             local current2 = tx * tx + tz * tz
             local radius = Navigation.THREAT_RADII[threat.prefab] or Navigation.THREAT_RADIUS
+            local radius2 = radius * radius
+            local clearance2 = current2 <= radius2
+                and math.max(nearest2, relative * radius2) or radius2
             local projection = tx * dx + tz * dz
-            if current2 <= radius * radius then
-                if projection > 0 then return false, "threat_blocked" end
-            else
-                local fraction = length2 > 0 and math.max(0, math.min(1, projection / length2)) or 0
-                local near_x, near_z = tx - fraction * dx, tz - fraction * dz
-                if near_x * near_x + near_z * near_z < radius * radius then
-                    return false, "threat_blocked"
-                end
+            local fraction = length2 > 0 and math.max(0, math.min(1, projection / length2)) or 0
+            local near_x, near_z = tx - fraction * dx, tz - fraction * dz
+            if near_x * near_x + near_z * near_z + 1e-6 < clearance2 then
+                return false, "threat_blocked"
+            end
+            local end_x, end_z = threat.x - x, threat.z - z
+            if current2 <= radius2 and end_x * end_x + end_z * end_z <= clearance2 + 1e-6 then
+                return false, "threat_blocked"
             end
         end
     end
     return true, "threats_clear"
 end
 
--- [喵喵喵]: 候选点必须不落在任何可见威胁的当前半径之内(否则就是"往怪里走")。
-local function not_nearer_than_player(x, z, px, pz, threats)
-    if type(threats) ~= "table" then
-        return true
+-- [喵喵喵]: 蛛网可步行，危险由可见威胁检查控制；墙体与水面仍阻挡，未知通路仍拒绝。 (2026-11-12)
+local function los_clear(px, pz, gx, gz)
+    local pf = get_pathfinder()
+    if pf == nil or pf.IsClear == nil then
+        return nil, "los_unsupported"
     end
-    for i = 1, #threats do
-        local t = threats[i]
-        local tx = type(t) == "table" and t.x or nil
-        local tz = type(t) == "table" and t.z or nil
-        if is_finite_number(tx) and is_finite_number(tz) then
-            local mdx, mdz = px - tx, pz - tz
-            local cdx, cdz = x - tx, z - tz
-            if cdx * cdx + cdz * cdz < mdx * mdx + mdz * mdz - 0.01 then
-                return false
-            end
-        end
+    local ok, clear = pcall(function()
+        return pf:IsClear(px, 0, pz, gx, 0, gz, LAND_PATH_CAPS)
+    end)
+    if not ok or type(clear) ~= "boolean" then
+        return nil, "los_query_failed"
     end
-    return true
+    return clear, clear == false and "los_blocked" or nil
 end
 
--- [喵喵喵]: 远离可见威胁的安全点：取威胁合力反方向，再依次偏 ±30/60/90 度，
--- 只接受客户端地图明确可走(且不在洞里)的点；都不行就明确 nil+原因。
+-- [喵喵喵]: 优先沿威胁合力反方向撤退，再试偏转和切线方向；
+-- 每段都须确认安全、地形可走且直线畅通，否则明确返回 nil+原因。
 local function safe_away_point(px, pz, threats, distance)
     if type(threats) ~= "table" or #threats == 0 then
         return nil, "no_visible_threats"
@@ -252,21 +285,51 @@ local function safe_away_point(px, pz, threats, distance)
         alen = 1
     end
     local base = math.atan2(az, ax)
-    local offsets = { 0, 0.52, -0.52, 1.05, -1.05, 1.57, -1.57 }
-    local last_reason = nil
-    for i = 1, #offsets do
-        local angle = base + offsets[i]
-        local cx = px + math.cos(angle) * distance
-        local cz = pz + math.sin(angle) * distance
-        if not_nearer_than_player(cx, cz, px, pz, threats)
-            and waypoint_is_safe(cx, cz, px, pz, threats) then
-            local ok, why = terrain_ok(cx, cz)
-            if ok == true then
-                return cx, cz
+    local angles = {}
+    for _, offset in ipairs({ 0, 0.52, -0.52, 1.05, -1.05, 1.57, -1.57 }) do
+        angles[#angles + 1] = base + offset
+    end
+    -- [喵喵喵]: 固定角度会漏掉两侧敌人之间的窄通道，补入保护边界的切线方向。 (2026-11-12)
+    local nearest2, relative = starting_clearance(px, pz, threats)
+    for _, threat in ipairs(threats) do
+        if is_finite_number(threat.x) and is_finite_number(threat.z) then
+            local dx, dz = threat.x - px, threat.z - pz
+            local current2 = dx * dx + dz * dz
+            local radius = Navigation.THREAT_RADII[threat.prefab] or Navigation.THREAT_RADIUS
+            local radius2 = radius * radius
+            local clearance2 = current2 <= radius2
+                and math.max(nearest2, relative * radius2) or radius2
+            if current2 > 0 then
+                local spread = math.asin(math.min(1, math.sqrt(clearance2 / current2)))
+                local direction = math.atan2(dz, dx)
+                angles[#angles + 1] = direction - spread
+                angles[#angles + 1] = direction + spread
             end
-            last_reason = why
-        else
-            last_reason = "toward_threat"
+        end
+    end
+    local last_reason = nil
+    -- [喵喵喵]: 落点可走不代表中途可达；优先选已确认畅通的退路，受阻时缩短距离。 (2026-11-12)
+    for _, scale in ipairs({ 1, 0.5, 0.25 }) do
+        local step = distance * scale
+        if step > Navigation.GOAL_RANGE then
+            for _, angle in ipairs(angles) do
+                local cx = px + math.cos(angle) * step
+                local cz = pz + math.sin(angle) * step
+                if waypoint_is_safe(cx, cz, px, pz, threats) then
+                    local ok, why = terrain_ok(cx, cz)
+                    if ok == true then
+                        local clear, clear_why = los_clear(px, pz, cx, cz)
+                        if clear == true then
+                            return cx, cz
+                        end
+                        last_reason = clear_why
+                    else
+                        last_reason = why
+                    end
+                else
+                    last_reason = "toward_threat"
+                end
+            end
         end
     end
     return nil, last_reason or "no_safe_point"
@@ -299,9 +362,9 @@ local function submit_search(nav, px, pz, gx, gz)
     if pf == nil or pf.SubmitSearch == nil then
         return false, "pathfinder_unsupported"
     end
-    -- [喵喵喵]: pathcaps=nil → 与玩家自身 locomotor 缺省一致，只走陆地。
+    -- [喵喵喵]: 搜索与直达检查使用相同陆地能力，避免脚下蛛网被当成不可离开的障碍。 (2026-11-12)
     local ok, handle = pcall(function()
-        return pf:SubmitSearch(px, 0, pz, gx, 0, gz, nil)
+        return pf:SubmitSearch(px, 0, pz, gx, 0, gz, LAND_PATH_CAPS)
     end)
     if not ok then
         return false, "search_submit_error"
@@ -313,21 +376,6 @@ local function submit_search(nav, px, pz, gx, gz)
     nav.handle_world = TheWorld
     nav.search_started = now()
     return true
-end
-
--- [喵喵喵]: 与原生 locomotor.lua:1837 同一调用形状(含 caps=nil)；读不出来返回 nil。
-local function los_clear(px, pz, gx, gz)
-    local pf = get_pathfinder()
-    if pf == nil or pf.IsClear == nil then
-        return nil
-    end
-    local ok, clear = pcall(function()
-        return pf:IsClear(px, 0, pz, gx, 0, gz, nil)
-    end)
-    if not ok then
-        return nil
-    end
-    return clear == true
 end
 
 --------------------------------------------------------------------------
@@ -401,7 +449,7 @@ local function install_waypoints(nav, wps, truncated, is_detour)
     return wps
 end
 
--- [喵喵喵]: 卡住时的侧移/后退：只在"客户端地图明确可走 + 不靠近威胁"的点上
+-- [喵喵喵]: 卡住时的侧移/后退：只在"客户端地图明确可走 + 保持当前安全余量"的点上
 -- 走一小步，目的只是把自己从卡住的位置挪开，然后重新搜索。找不到就不编，返回 false。
 local function try_side_step(nav, px, pz, goal, threats)
     local gdx, gdz = goal.x - px, goal.z - pz
@@ -417,8 +465,7 @@ local function try_side_step(nav, px, pz, goal, threats)
         local rz = dirx * math.sin(a) + dirz * math.cos(a)
         local cx = px + rx * Navigation.SIDE_STEP
         local cz = pz + rz * Navigation.SIDE_STEP
-        if not_nearer_than_player(cx, cz, px, pz, threats)
-            and waypoint_is_safe(cx, cz, px, pz, threats)
+        if waypoint_is_safe(cx, cz, px, pz, threats)
             and terrain_ok(cx, cz) == true then
             -- [喵喵喵]: 侧移目标单独占一代 gen(自己的显式 id)，并标记 detour：它的完成
             -- 不再消耗新的重规划预算，而是继续上一轮已经计过数的那次重规划。
@@ -927,9 +974,9 @@ function Navigation.Retreat(player, snapshot, state, distance)
     if threats == nil or #threats == 0 then
         return nil, "no_visible_threats"
     end
-    local x, z, why = safe_away_point(snapshot.x, snapshot.z, threats, dist)
+    local x, z = safe_away_point(snapshot.x, snapshot.z, threats, dist)
     if x == nil then
-        return nil, why or "no_safe_point"
+        return nil, z or "no_safe_point"
     end
     -- [喵喵喵]: 同一点用同一个 id：反复求生不会把同一目标当成"新路线"狂重开。
     local goal = {

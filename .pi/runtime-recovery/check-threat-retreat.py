@@ -101,6 +101,7 @@ def survival_fixture():
         TheWorld.Map.IsOceanAtPoint = function() return false end
         TheWorld.Map.IsPassableAtPoint = function() return true end
         TheWorld.Map.IsPointNearHole = function() return false end
+        TheWorld.Pathfinder = { IsClear = function() return true end }
         s, state = snapshot(), {}
         threat = { guid = 55, prefab = "rook", x = 13, z = 0,
             entity = entity(55, "rook", { monster = true }) }

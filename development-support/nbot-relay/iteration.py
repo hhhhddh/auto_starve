@@ -206,13 +206,14 @@ def prepare():
                            "[STEAM]\nauthentication_port = %d\nmaster_server_port = %d\n" %
                            (port, "true" if name == "Master" else "false", name, shard_id,
                             11243 + int(shard_id), 11245 + int(shard_id))),
-            "worldgenoverride.lua": 'return { override_enabled = true, preset = "%s", overrides = {} }\n' % preset,
+            "worldgenoverride.lua": 'return { override_enabled = true, preset = "%s", overrides = { specialevent = "none" } }\n' % preset,
             "modoverrides.lua": ('return { ["WilsonExpeditionDiagnostics"] = { enabled = true, '
                                  'configuration_options = { auto_iteration = true } } }\n'),
         }.items():
             target = directory / file
             if not target.exists():
                 target.write_text(content, encoding="utf-8")
+    disable_world_events(cluster)
     # [喵喵喵]: 客户端使用项目独立存储，仅启用本项目 Mod，不修改平时的存档与 Mod 列表。
     import winreg
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam\ActiveProcess") as key:
@@ -300,6 +301,33 @@ def config_table(path):
     return result
 
 
+def disable_world_events(cluster):
+    """Set the next owned world startup to vanilla events-none without editing saves."""
+    for shard in ("Master", "Caves"):
+        path = cluster / shard / "worldgenoverride.lua"
+        world = config_table(path)
+        if (world.get("override_enabled") is not True or not isinstance(world.get("overrides"), dict)
+                or set(world) - {"override_enabled", "preset", "worldgen_preset", "settings_preset", "overrides"}
+                or not all(isinstance(k, str) and isinstance(v, str) for k, v in world["overrides"].items())):
+            raise ValueError("Unexpected world generation configuration: " + shard)
+        if world["overrides"].get("specialevent") == "none":
+            continue
+        world["overrides"]["specialevent"] = "none"
+        lines = ["return {", "    override_enabled = true,"]
+        for key in ("preset", "worldgen_preset", "settings_preset"):
+            if key in world:
+                if not isinstance(world[key], str):
+                    raise ValueError("Invalid world preset: " + shard)
+                lines.append("    " + key + " = " + json.dumps(world[key], ensure_ascii=False) + ",")
+        lines.append("    overrides = {")
+        for key, value in sorted(world["overrides"].items()):
+            lines.append("        [" + json.dumps(key, ensure_ascii=False) + "] = " + json.dumps(value, ensure_ascii=False) + ",")
+        lines.extend(["    },", "}", ""])
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text("\n".join(lines), encoding="utf-8")
+        temporary.replace(path)
+
+
 def preflight():
     profile = load_profile()
     marker = read_json(STORAGE / ".wilson-expedition-owner.json")
@@ -360,6 +388,8 @@ def preflight():
         if level_data.exists() and level_data.read_text(encoding="utf-8-sig").strip() != "return nil":
             raise ValueError("World presets must be supplied through worldgenoverride.lua: " + name)
         world = config_table(directory / "worldgenoverride.lua")
+        if world.get("overrides", {}).get("specialevent") == "none":
+            world["overrides"] = {key: value for key, value in world["overrides"].items() if key != "specialevent"}
         expected_world = {"override_enabled": True, "preset": preset, "overrides": {}}
         saved_world = {"override_enabled": True, "worldgen_preset": preset, "settings_preset": preset, "overrides": {}}
         saved_cave = dict(saved_world, overrides={"basicresource_regrowth": "always", "ghostsanitydrain": "none",
@@ -381,12 +411,18 @@ def preflight():
         raise ValueError("Previous iteration state must be inspected before launch")
     ready_path = PRIVATE / "iteration-agent-ready.json"
     agent = read_json(ready_path) if ready_path.exists() else {}
+    target_path = PRIVATE / "iteration-agent-target.json"
+    target = read_json(target_path) if target_path.exists() else {}
+    target_session = target.get("sessionId") if target.get("schema") == "wilson-expedition/agent-target@1" else None
     notified_at = agent.get("updatedUtc")
     agent_ready = False
     if isinstance(notified_at, str):
         try:
             elapsed = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(notified_at)).total_seconds()
-            agent_ready = (agent.get("schema") == "wilson-expedition/agent-ready@1" and agent.get("status") == "active"
+            # [喵喵喵]: 同项目的其他会话也可能有新鲜心跳；只有显式指定对话的回执才允许启动测试。 (2026-11-13)
+            agent_ready = (isinstance(target_session, str) and bool(target_session.strip())
+                           and agent.get("sessionId") == target_session and agent.get("routing") == "explicit-session@1"
+                           and agent.get("schema") == "wilson-expedition/agent-ready@1" and agent.get("status") == "active"
                            and 0 <= elapsed <= 30
                            and (not os.environ.get("PI_SESSION_ID") or agent.get("sessionId") == os.environ["PI_SESSION_ID"]))
         except (ValueError, TypeError):
@@ -401,8 +437,8 @@ def preflight():
             "runtimeChecks": ["Client Mod load, native Lua engine and input path", "Both shard handshakes and character selection",
                               "Death capture and source repair approval", "World regeneration reloads client and both shard builds"],
             "agentExtension": {"path": str(PROJECT / ".pi/extensions/wilson-iteration.js"),
-                               "receipt": str(ready_path), "ready": agent_ready},
-            "remainingPrerequisites": ([] if agent_ready else ["Reload the project Pi session to activate death notifications"])
+                               "receipt": str(ready_path), "targetSessionId": target_session, "ready": agent_ready},
+            "remainingPrerequisites": ([] if agent_ready else ["Reload Pi extensions and run /wilson-notify-here in the intended conversation"])
                                       + ["Explicit game-test authorization is required"],
             "relayRequired": False}
 
@@ -657,7 +693,7 @@ def run(capture_only=False):
     PRIVATE.mkdir(parents=True, exist_ok=True)
     report = preflight()
     if not report["agentExtension"]["ready"]:
-        raise ValueError("Reload this project's Pi session before starting: a current death-notifier heartbeat is required")
+        raise ValueError("Reload Pi extensions and run /wilson-notify-here: the designated conversation must have a current notifier heartbeat")
     # [喵喵喵]: 已运行的客户端可能持有不同配置；不接管、不关闭它，也不让 Steam 复用它连接测试世界。
     probe = subprocess.run(["pwsh", "-NoProfile", "-Command",
                             '$ErrorActionPreference="Stop"; @(Get-Process -ErrorAction SilentlyContinue | '
@@ -674,6 +710,8 @@ def run(capture_only=False):
                            capture_output=True, text=True, encoding="utf-8", timeout=20, check=True)
     if ports.stdout.strip() != "0":
         raise ValueError("The reserved test ports are occupied; no existing process was stopped")
+    # [喵喵喵]: 只在确认游戏进程和端口空闲后的下次启动写覆盖项，不改变正在运行的挑战。
+    disable_world_events(STORAGE / "WilsonExpedition/Iteration")
     lock = PRIVATE / "iteration-run.lock"
     handle = lock.open("x", encoding="utf-8")
     try:
